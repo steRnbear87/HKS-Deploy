@@ -7,12 +7,14 @@ const {
   resolveTargetTenantIdMock,
   matchAppToWingetMock,
   matchAppToWingetWithDatabaseMock,
+  getUploadHistoryByUserIdMock,
 } = vi.hoisted(() => ({
   parseAccessTokenMock: vi.fn(),
   createServerClientMock: vi.fn(),
   resolveTargetTenantIdMock: vi.fn(),
   matchAppToWingetMock: vi.fn(),
   matchAppToWingetWithDatabaseMock: vi.fn(),
+  getUploadHistoryByUserIdMock: vi.fn(),
 }));
 
 vi.mock('@/lib/auth-utils', () => ({
@@ -35,6 +37,16 @@ vi.mock('@/lib/app-matching', () => ({
   matchAppToWingetWithDatabase: matchAppToWingetWithDatabaseMock,
 }));
 
+// computeUserAppUpdates() reads upload_history via the DB adapter (works in
+// both Supabase/SQLite mode) rather than a raw Supabase query - mock it
+// directly instead of routing through the real getDatabase(), which pulls in
+// a dynamic require() that doesn't resolve under Vitest's transform.
+vi.mock('@/lib/db', () => ({
+  getDatabase: () => ({
+    uploadHistory: { getByUserId: getUploadHistoryByUserIdMock },
+  }),
+}));
+
 import { GET } from '@/app/api/intune/apps/updates/route';
 
 function createSupabaseMock(
@@ -49,11 +61,6 @@ function createSupabaseMock(
       discovered_app_name: string;
       winget_package_id: string;
     }>;
-    uploadHistoryRows?: Array<{
-      intune_app_id: string;
-      winget_id: string;
-      version: string | null;
-    }>;
   } = {}
 ) {
   return {
@@ -63,15 +70,6 @@ function createSupabaseMock(
         chain.select = vi.fn(() => chain);
         chain.eq = vi.fn(() => chain);
         chain.single = vi.fn(async () => ({ data: { id: 'consent-1' }, error: null }));
-        return chain;
-      }
-
-      if (table === 'upload_history') {
-        const chain: Record<string, unknown> = {};
-        chain.select = vi.fn(() => chain);
-        chain.eq = vi.fn(() => chain);
-        chain.then = (resolve: (value: { data: unknown; error: unknown }) => unknown) =>
-          Promise.resolve({ data: options.uploadHistoryRows || [], error: null }).then(resolve);
         return chain;
       }
 
@@ -124,6 +122,7 @@ describe('GET /api/intune/apps/updates', () => {
       tenantId: 'tenant-1',
       errorResponse: null,
     });
+    getUploadHistoryByUserIdMock.mockResolvedValue([]);
   });
 
   it('compares updates using newest app object per Winget ID', async () => {
@@ -364,14 +363,12 @@ describe('GET /api/intune/apps/updates', () => {
   });
 
   it('tags deployment-history matches as managed without fuzzy matching', async () => {
+    getUploadHistoryByUserIdMock.mockResolvedValue([
+      { intune_app_id: 'app-git', winget_id: 'Git.Git', version: '2.40.0', intune_tenant_id: 'tenant-1', user_id: 'user-1' },
+    ]);
     createServerClientMock.mockReturnValue(
       createSupabaseMock(
         [{ winget_id: 'Git.Git', latest_version: '2.45.0' }],
-        {
-          uploadHistoryRows: [
-            { intune_app_id: 'app-git', winget_id: 'Git.Git', version: '2.40.0' },
-          ],
-        }
       )
     );
 
@@ -412,9 +409,13 @@ describe('GET /api/intune/apps/updates', () => {
     expect(response.status).toBe(200);
     expect(body.updateCount).toBe(1);
     expect(body.updates[0].wingetId).toBe('Git.Git');
-    // Deployment history is authoritative provenance -> managed, fuzzy skipped
+    // Deployment history is authoritative provenance for THIS user -> managed,
+    // regardless of what the shared tenant-level match (description marker /
+    // claimed / manual / fuzzy) found for this app. Tenant-level matching now
+    // runs once per tenant ahead of any specific user's upload_history (so it
+    // can be reused across every user of that tenant), so it may still invoke
+    // the fuzzy matchers for an app this user happens to have deployed - that's
+    // fine, upload_history still wins the per-user resolution either way.
     expect(body.updates[0].isManaged).toBe(true);
-    expect(matchAppToWingetMock).not.toHaveBeenCalled();
-    expect(matchAppToWingetWithDatabaseMock).not.toHaveBeenCalled();
   });
 });

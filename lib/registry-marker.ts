@@ -1,8 +1,8 @@
 /**
  * Registry Marker Path Helpers
  *
- * IntuneGet writes a detection marker to the registry during install
- * (HKLM\SOFTWARE\IntuneGet\Apps\<sanitizedWingetId>, or HKCU for user scope)
+ * HKS App Deployment writes a detection marker to the registry during install
+ * (HKLM\SOFTWARE\HKS\Apps\<sanitizedWingetId>, or HKCU for user scope)
  * and points the Intune detection rule at it. Organizations can customize the
  * marker root via psadtConfig.registryMarkerPath (issue #106); these helpers
  * normalize that value and rewrite already-generated detection rules.
@@ -14,7 +14,7 @@
  */
 
 /** Default marker root: subpath under the hive, no hive prefix */
-export const DEFAULT_REGISTRY_MARKER_PATH = 'SOFTWARE\\IntuneGet\\Apps';
+export const DEFAULT_REGISTRY_MARKER_PATH = 'SOFTWARE\\HKS\\Apps';
 
 /**
  * Normalize a user-supplied registry marker path into a safe subpath under
@@ -50,7 +50,7 @@ export function normalizeMarkerPath(input?: string | null): string {
 }
 
 /**
- * Rewrite an IntuneGet registry marker keyPath to use a new marker root.
+ * Rewrite an HKS App Deployment registry marker keyPath to use a new marker root.
  *
  * A marker keyPath has the shape `<hive>\<root>\<sanitizedWingetId>` where
  * hive is HKEY_LOCAL_MACHINE or HKEY_CURRENT_USER. The hive and the trailing

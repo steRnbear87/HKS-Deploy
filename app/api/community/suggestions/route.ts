@@ -5,7 +5,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { createServerClient } from '@/lib/supabase';
+import { createServerClient, isSupabaseConfigured } from '@/lib/supabase';
 import { parseAccessToken } from '@/lib/auth-utils';
 import {
   suggestionSchema,
@@ -30,6 +30,17 @@ import { getCatalogSource } from '@/lib/catalog';
  */
 export async function GET(request: NextRequest) {
   try {
+    // Community suggestions/voting is backed by Supabase-only tables with no
+    // SQLite equivalent. Self-hosted installs have no shared "community" to
+    // suggest into anyway, so degrade to an empty list rather than erroring.
+    if (!isSupabaseConfigured()) {
+      return NextResponse.json({
+        suggestions: [],
+        userVotes: [],
+        pagination: { page: 1, limit: 20, total: 0, totalPages: 0 },
+      });
+    }
+
     // Rate limit by IP for public access
     const rateLimitResponse = await applyRateLimit(getIpKey(request), PUBLIC_RATE_LIMIT);
     if (rateLimitResponse) return rateLimitResponse;
@@ -118,7 +129,8 @@ export async function GET(request: NextRequest) {
         totalPages: Math.ceil((count || 0) / limit),
       },
     });
-  } catch {
+  } catch (error) {
+    console.error('[GET /api/community/suggestions] Unhandled error:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }
@@ -132,6 +144,13 @@ export async function GET(request: NextRequest) {
  */
 export async function POST(request: NextRequest) {
   try {
+    if (!isSupabaseConfigured()) {
+      return NextResponse.json(
+        { error: 'App suggestions are not supported in self-hosted SQLite mode. This feature requires Supabase.' },
+        { status: 501 }
+      );
+    }
+
     const user = await parseAccessToken(request.headers.get('Authorization'));
     if (!user) {
       return NextResponse.json(
@@ -275,7 +294,8 @@ export async function POST(request: NextRequest) {
       { suggestion },
       { status: 201 }
     );
-  } catch {
+  } catch (error) {
+    console.error('[POST /api/community/suggestions] Unhandled error:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }

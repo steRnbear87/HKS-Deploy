@@ -6,6 +6,7 @@ import { T, Var } from "gt-next";
 import { Button } from '@/components/ui/button';
 import { markOnboardingComplete } from '@/lib/onboarding-utils';
 import { markConsentGranted } from '@/components/AdminConsentBanner';
+import { getFirstName } from '@/lib/utils';
 import {
   clearPostAuthRedirect,
   getSafeInternalRedirect,
@@ -18,7 +19,7 @@ interface SuccessStepProps {
 
 export function SuccessStep({ userName, callbackUrl }: SuccessStepProps) {
   const router = useRouter();
-  const firstName = userName?.split(' ')[0] || 'there';
+  const firstName = getFirstName(userName);
 
   const handleGoToDashboard = () => {
     // Mark both consent and onboarding as complete
@@ -112,7 +113,7 @@ export function SuccessStep({ userName, callbackUrl }: SuccessStepProps) {
       {/* Additional info */}
       <p className="text-xs text-text-muted mt-6">
         <T>Any user with Intune permissions in your organization can now use
-        IntuneGet.</T>
+        HKS App Deployment.</T>
       </p>
     </div>
   );

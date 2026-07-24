@@ -39,7 +39,7 @@ export function TestimonialSection() {
           </h2>
           <p className="mx-auto max-w-[700px] text-lg text-text-secondary mb-12">
             Join hundreds of IT professionals who are already excited about
-            IntuneGet
+            HKS App Deployment
           </p>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-8 max-w-4xl mx-auto">

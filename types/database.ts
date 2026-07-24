@@ -761,6 +761,195 @@ export interface Database {
         };
         Relationships: GenericRelationship[];
       };
+      deployment_drift_results: {
+        Row: {
+          id: string;
+          user_id: string;
+          tenant_id: string;
+          winget_id: string;
+          intune_app_id: string;
+          display_name: string;
+          expected_version: string;
+          total_devices_scanned: number;
+          on_expected_count: number;
+          behind_count: number;
+          ahead_count: number;
+          partial: boolean;
+          scanned_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          tenant_id: string;
+          winget_id: string;
+          intune_app_id: string;
+          display_name: string;
+          expected_version: string;
+          total_devices_scanned?: number;
+          on_expected_count?: number;
+          behind_count?: number;
+          ahead_count?: number;
+          partial?: boolean;
+          scanned_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          tenant_id?: string;
+          winget_id?: string;
+          intune_app_id?: string;
+          display_name?: string;
+          expected_version?: string;
+          total_devices_scanned?: number;
+          on_expected_count?: number;
+          behind_count?: number;
+          ahead_count?: number;
+          partial?: boolean;
+          scanned_at?: string;
+        };
+        Relationships: GenericRelationship[];
+      };
+      device_bios_info: {
+        Row: {
+          id: string;
+          tenant_id: string;
+          device_id: string;
+          bios_version: string | null;
+          captured_at: string;
+        };
+        Insert: {
+          id?: string;
+          tenant_id: string;
+          device_id: string;
+          bios_version?: string | null;
+          captured_at?: string;
+        };
+        Update: {
+          id?: string;
+          tenant_id?: string;
+          device_id?: string;
+          bios_version?: string | null;
+          captured_at?: string;
+        };
+        Relationships: GenericRelationship[];
+      };
+      device_update_groups: {
+        Row: {
+          id: string;
+          tenant_id: string;
+          device_id: string;
+          azure_ad_device_id: string;
+          entra_group_id: string;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          tenant_id: string;
+          device_id: string;
+          azure_ad_device_id: string;
+          entra_group_id: string;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          tenant_id?: string;
+          device_id?: string;
+          azure_ad_device_id?: string;
+          entra_group_id?: string;
+          created_at?: string;
+        };
+        Relationships: GenericRelationship[];
+      };
+      device_health_snapshots: {
+        Row: {
+          id: string;
+          tenant_id: string;
+          snapshot_date: string;
+          captured_at: string;
+          total_devices: number;
+          compliant_count: number;
+          noncompliant_count: number;
+          in_grace_period_count: number;
+          config_manager_count: number;
+          unknown_count: number;
+          stale_count: number;
+          partial: boolean;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          tenant_id: string;
+          snapshot_date: string;
+          captured_at: string;
+          total_devices?: number;
+          compliant_count?: number;
+          noncompliant_count?: number;
+          in_grace_period_count?: number;
+          config_manager_count?: number;
+          unknown_count?: number;
+          stale_count?: number;
+          partial?: boolean;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          tenant_id?: string;
+          snapshot_date?: string;
+          captured_at?: string;
+          total_devices?: number;
+          compliant_count?: number;
+          noncompliant_count?: number;
+          in_grace_period_count?: number;
+          config_manager_count?: number;
+          unknown_count?: number;
+          stale_count?: number;
+          partial?: boolean;
+          created_at?: string;
+        };
+        Relationships: GenericRelationship[];
+      };
+      fleet_app_inventory: {
+        Row: {
+          id: string;
+          tenant_id: string;
+          snapshot_date: string;
+          captured_at: string;
+          app_key: string;
+          display_name: string;
+          publisher: string | null;
+          device_count: number;
+          devices_total: number;
+          partial: boolean;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          tenant_id: string;
+          snapshot_date: string;
+          captured_at: string;
+          app_key: string;
+          display_name: string;
+          publisher?: string | null;
+          device_count?: number;
+          devices_total?: number;
+          partial?: boolean;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          tenant_id?: string;
+          snapshot_date?: string;
+          captured_at?: string;
+          app_key?: string;
+          display_name?: string;
+          publisher?: string | null;
+          device_count?: number;
+          devices_total?: number;
+          partial?: boolean;
+          created_at?: string;
+        };
+        Relationships: GenericRelationship[];
+      };
       app_update_policies: {
         Row: {
           id: string;

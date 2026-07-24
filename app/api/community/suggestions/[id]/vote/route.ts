@@ -5,7 +5,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { createServerClient } from '@/lib/supabase';
+import { createServerClient, isSupabaseConfigured } from '@/lib/supabase';
 import { parseAccessToken } from '@/lib/auth-utils';
 import { isValidUuid } from '@/lib/validators/community';
 import {
@@ -17,6 +17,13 @@ import {
 interface RouteParams {
   params: Promise<{ id: string }>;
 }
+
+// Voting is backed by Supabase-only tables with no SQLite equivalent.
+const NOT_SUPPORTED_RESPONSE = () =>
+  NextResponse.json(
+    { error: 'Voting on app suggestions is not supported in self-hosted SQLite mode. This feature requires Supabase.' },
+    { status: 501 }
+  );
 
 /**
  * POST /api/community/suggestions/[id]/vote
@@ -30,6 +37,10 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
         { error: 'Authentication required' },
         { status: 401 }
       );
+    }
+
+    if (!isSupabaseConfigured()) {
+      return NOT_SUPPORTED_RESPONSE();
     }
 
     // Rate limit by user
@@ -123,7 +134,8 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       success: true,
       votes_count: updatedSuggestion?.votes_count || 0,
     });
-  } catch {
+  } catch (error) {
+    console.error('[/api/community/suggestions/[id]/vote] Unhandled error:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }
@@ -143,6 +155,10 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
         { error: 'Authentication required' },
         { status: 401 }
       );
+    }
+
+    if (!isSupabaseConfigured()) {
+      return NOT_SUPPORTED_RESPONSE();
     }
 
     // Rate limit by user
@@ -196,7 +212,8 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
       success: true,
       votes_count: updatedSuggestion?.votes_count || 0,
     });
-  } catch {
+  } catch (error) {
+    console.error('[/api/community/suggestions/[id]/vote] Unhandled error:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }

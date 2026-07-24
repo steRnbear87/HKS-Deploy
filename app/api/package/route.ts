@@ -5,7 +5,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { createServerClient } from '@/lib/supabase';
+import { createServerClient, isSupabaseConfigured } from '@/lib/supabase';
 import { getDatabase } from '@/lib/db';
 import {
   isGitHubActionsConfigured,
@@ -74,17 +74,23 @@ export async function POST(request: NextRequest) {
     const tokenTenantId = user.tenantId;
 
     // Check for MSP tenant override header and enforce tenant access checks
-    // (membership, managed tenant consent, and customer-only access mode)
-    const mspTenantId = request.headers.get('X-MSP-Tenant-Id');
-    const { tenantId, errorResponse: tenantError } = await resolveTargetTenantId({
-      supabase: createServerClient(),
-      userId,
-      tokenTenantId,
-      requestedTenantId: mspTenantId,
-    });
+    // (membership, managed tenant consent, and customer-only access mode).
+    // MSP tenant resolution needs Supabase; self-hosted SQLite installs without
+    // it configured just use the signed-in user's own tenant.
+    let tenantId = tokenTenantId;
+    if (isSupabaseConfigured()) {
+      const mspTenantId = request.headers.get('X-MSP-Tenant-Id');
+      const { tenantId: resolvedTenantId, errorResponse: tenantError } = await resolveTargetTenantId({
+        supabase: createServerClient(),
+        userId,
+        tokenTenantId,
+        requestedTenantId: mspTenantId,
+      });
 
-    if (tenantError) {
-      return tenantError;
+      if (tenantError) {
+        return tenantError;
+      }
+      tenantId = resolvedTenantId;
     }
 
     // Verify admin consent for the target tenant before accepting jobs
@@ -192,9 +198,11 @@ export async function POST(request: NextRequest) {
           { status: 400 }
         );
       }
-      // Catalog packages must retain their trusted manifest hash. Custom apps
-      // may omit it and have the packaging runner calculate it after download.
-      if (!installerSha256 && item.sourceType !== 'custom') {
+      // Catalog packages must retain their trusted manifest hash. Custom and
+      // Chocolatey apps may omit it and have the packaging runner calculate it
+      // after download (Chocolatey's "installer" is always the official
+      // bootstrap script, not the real payload - see lib/chocolatey-app.ts).
+      if (!installerSha256 && item.sourceType !== 'custom' && item.sourceType !== 'chocolatey') {
         return NextResponse.json(
           {
             error: `Missing installer SHA256 for "${item.displayName || item.wingetId}": catalog packages require a trusted manifest hash`,
@@ -468,7 +476,7 @@ export async function POST(request: NextRequest) {
               displayName: item.displayName,
               description: buildIntuneAppDescription({
                 description: item.description,
-                fallback: `Deployed via IntuneGet from Winget: ${item.wingetId}`,
+                fallback: `Deployed via HKS App Deployment from Winget: ${item.wingetId}`,
               }),
               publisher: item.publisher,
               version: item.version,
@@ -577,7 +585,8 @@ export async function POST(request: NextRequest) {
             ? `${storeDeployed} Store app(s) deployed successfully`
             : `${win32Queued} job(s) queued successfully`,
     });
-  } catch {
+  } catch (error) {
+    console.error('[POST /api/package] Unhandled error:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }
@@ -700,15 +709,19 @@ export async function GET(request: NextRequest) {
     // one tenant can see each other's IntuneGet apps and avoid duplicates).
     const scope = searchParams.get('scope');
     if (scope === 'tenant') {
-      const mspTenantId = request.headers.get('X-MSP-Tenant-Id');
-      const { tenantId, errorResponse } = await resolveTargetTenantId({
-        supabase: createServerClient(),
-        userId: user.userId,
-        tokenTenantId: user.tenantId,
-        requestedTenantId: mspTenantId,
-      });
-      if (errorResponse) {
-        return errorResponse;
+      let tenantId = user.tenantId;
+      if (isSupabaseConfigured()) {
+        const mspTenantId = request.headers.get('X-MSP-Tenant-Id');
+        const tenantResolution = await resolveTargetTenantId({
+          supabase: createServerClient(),
+          userId: user.userId,
+          tokenTenantId: user.tenantId,
+          requestedTenantId: mspTenantId,
+        });
+        if (tenantResolution.errorResponse) {
+          return tenantResolution.errorResponse;
+        }
+        tenantId = tenantResolution.tenantId;
       }
 
       const tenantJobs = await db.jobs.getByTenantId(tenantId, 50);
@@ -722,7 +735,8 @@ export async function GET(request: NextRequest) {
     const healedJobs = await healStaleJobs(db, jobs);
 
     return NextResponse.json({ jobs: healedJobs });
-  } catch {
+  } catch (error) {
+    console.error('[GET /api/package] Unhandled error:', error);
     return NextResponse.json(
       { error: 'Failed to fetch jobs' },
       { status: 500 }

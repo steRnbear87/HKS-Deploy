@@ -43,7 +43,7 @@ export async function GET(request: NextRequest) {
       iconPath: app.icon_path,
       category: app.category,
       popularityRank: app.popularity_rank,
-      appSource: app.app_source === 'store' ? 'store' : 'win32',
+      appSource: app.app_source === 'store' ? 'store' : app.app_source === 'chocolatey' ? 'chocolatey' : 'win32',
       packageIdentifier: app.store_package_id || undefined,
       localeVariants: details.localeVariants,
       isLocaleVariant: false,

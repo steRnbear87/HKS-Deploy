@@ -31,7 +31,7 @@ export async function deployStoreApp(
   const appBody: Record<string, unknown> = {
     '@odata.type': '#microsoft.graph.winGetApp',
     displayName: item.displayName,
-    description: item.description || `Deployed via IntuneGet from Microsoft Store: ${item.packageIdentifier}\nSource: IntuneGet.com`,
+    description: item.description || `Deployed via HKS App Deployment from Microsoft Store: ${item.packageIdentifier}\nSource: HKS App Deployment`,
     publisher: item.publisher,
     packageIdentifier: item.packageIdentifier,
     installExperience: {

@@ -34,6 +34,7 @@ export interface UseAvailableUpdatesOptions {
   criticalOnly?: boolean;
   includeDismissed?: boolean;
   includeUnmanaged?: boolean;
+  enabled?: boolean;
 }
 
 export function buildAvailableUpdatesQueryParams(options: UseAvailableUpdatesOptions = {}): URLSearchParams {
@@ -85,7 +86,7 @@ export function useAvailableUpdates(options: UseAvailableUpdatesOptions = {}) {
 
       return response.json();
     },
-    enabled: isAuthenticated,
+    enabled: isAuthenticated && (options.enabled ?? true),
     staleTime: 1000 * 60, // 1 minute
     refetchOnWindowFocus: false,
   });

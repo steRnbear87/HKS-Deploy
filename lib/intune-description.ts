@@ -2,7 +2,7 @@
  * Utilities for building Intune app descriptions.
  */
 
-export const INTUNE_APP_SOURCE_MARKER = 'Source: IntuneGet.com';
+export const INTUNE_APP_SOURCE_MARKER = 'Source: HKS App Deployment';
 
 export interface IntuneDescriptionParams {
   description?: string;

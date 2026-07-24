@@ -39,7 +39,7 @@ export interface WorkflowInputs {
   removeAssignmentsFromPreviousApp?: boolean; // Remove assignments from previous app after carry-over
   autoSupersede?: boolean; // Mark the new app as superseding the previous app
   supersedenceType?: string; // Supersedence type for auto-supersede ('update' | 'replace')
-  sourceType?: 'winget' | 'custom'; // Custom installers are outside winget-pkgs trust validation
+  sourceType?: 'winget' | 'custom' | 'chocolatey'; // Custom/Chocolatey installers are outside winget-pkgs trust validation
 }
 
 export interface GitHubActionsConfig {

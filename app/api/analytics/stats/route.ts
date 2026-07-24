@@ -4,8 +4,12 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { createServerClient } from '@/lib/supabase';
+import { getDatabase } from '@/lib/db';
 import { parseAccessToken } from '@/lib/auth-utils';
+
+// Approximate "all" for stats aggregation (matches the scan limit used
+// elsewhere for self-hosted SQLite installs).
+const STATS_SCAN_LIMIT = 1000;
 
 export async function GET(request: NextRequest) {
   try {
@@ -15,14 +19,6 @@ export async function GET(request: NextRequest) {
         { error: 'Authentication required' },
         { status: 401 }
       );
-    }
-
-    const supabase = createServerClient();
-
-    // Define the shape of jobs returned from the queries
-    interface PackagingJobStats {
-      status: string;
-      completed_at: string | null;
     }
 
     interface PackagingJobRecent {
@@ -42,33 +38,9 @@ export async function GET(request: NextRequest) {
       1
     ));
 
-    // Fetch all jobs in a single query and aggregate in memory
-    // This is more efficient than 4 separate count queries
-    const { data: jobs, error: jobsError } = await supabase
-      .from('packaging_jobs')
-      .select('status, completed_at')
-      .eq('user_id', user.userId);
-
-    // Fetch 5 most recent jobs for activity feed
-    const { data: recentJobs, error: recentJobsError } = await supabase
-      .from('packaging_jobs')
-      .select('id, winget_id, display_name, status, created_at, intune_app_url')
-      .eq('user_id', user.userId)
-      .order('created_at', { ascending: false })
-      .limit(5);
-
-    if (recentJobsError) {
-      // Failed to fetch recent jobs - continue with empty array
-    }
-
-    if (jobsError) {
-      return NextResponse.json(
-        { error: 'Failed to fetch statistics' },
-        { status: 500 }
-      );
-    }
-
-    const allJobs = (jobs || []) as PackagingJobStats[];
+    const db = getDatabase();
+    const allJobs = await db.jobs.getByUserId(user.userId, STATS_SCAN_LIMIT);
+    const recentJobs: PackagingJobRecent[] = allJobs.slice(0, 5);
 
     // Aggregate stats in memory
     let totalDeployed = 0;
@@ -108,8 +80,7 @@ export async function GET(request: NextRequest) {
       intuneAppUrl?: string;
     }
 
-    const allRecentJobs = (recentJobs || []) as PackagingJobRecent[];
-    const recentActivity: RecentActivityItem[] = allRecentJobs.map((job) => {
+    const recentActivity: RecentActivityItem[] = recentJobs.map((job) => {
       let type: 'upload' | 'package' | 'error' = 'package';
       let status: 'success' | 'pending' | 'failed' = 'pending';
       let description = '';
@@ -175,7 +146,8 @@ export async function GET(request: NextRequest) {
       failed,
       recentActivity,
     });
-  } catch {
+  } catch (error) {
+    console.error('[GET /api/analytics/stats] Unhandled error:', error);
     return NextResponse.json(
       { error: 'Failed to fetch statistics' },
       { status: 500 }

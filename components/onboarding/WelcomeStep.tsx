@@ -3,6 +3,7 @@
 import { Rocket, Shield, Package, ArrowRight } from 'lucide-react';
 import { T, Var } from "gt-next";
 import { Button } from '@/components/ui/button';
+import { getFirstName } from '@/lib/utils';
 
 interface WelcomeStepProps {
   userName: string | null | undefined;
@@ -10,7 +11,7 @@ interface WelcomeStepProps {
 }
 
 export function WelcomeStep({ userName, onNext }: WelcomeStepProps) {
-  const firstName = userName?.split(' ')[0] || 'there';
+  const firstName = getFirstName(userName);
 
   return (
     <div className="text-center max-w-2xl mx-auto">
@@ -33,7 +34,7 @@ export function WelcomeStep({ userName, onNext }: WelcomeStepProps) {
       {/* What IntuneGet does */}
       <div className="bg-bg-elevated border border-overlay/10 rounded-xl p-6 mb-8 text-left shadow-soft">
         <h2 className="text-lg font-semibold text-text-primary mb-4">
-          <T>What IntuneGet does</T>
+          <T>What HKS App Deployment does</T>
         </h2>
         <div className="space-y-4">
           <div className="flex items-start gap-4">

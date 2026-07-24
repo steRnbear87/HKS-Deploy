@@ -4,11 +4,22 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { createServerClient } from '@/lib/supabase';
+import { createServerClient, isSupabaseConfigured } from '@/lib/supabase';
 import { resolveTargetTenantId } from '@/lib/msp/tenant-resolution';
 import { parseAccessToken } from '@/lib/auth-utils';
 import type { ClaimAppRequest, ClaimedApp } from '@/types/unmanaged';
 import type { Database } from '@/types/database';
+
+// Claiming discovered/unmanaged apps stores state in the Supabase-only
+// claimed_apps/user_profiles tables, which have no SQLite equivalent yet.
+// Fail with a clear, actionable message instead of a generic 500.
+const NOT_SUPPORTED_RESPONSE = () =>
+  NextResponse.json(
+    {
+      error: 'Claiming discovered apps is not yet supported in self-hosted SQLite mode. This feature requires Supabase.',
+    },
+    { status: 501 }
+  );
 
 // Type alias for claimed_apps table row
 type ClaimedAppRow = Database['public']['Tables']['claimed_apps']['Row'];
@@ -63,6 +74,10 @@ export async function POST(request: NextRequest) {
         { error: 'Authentication required' },
         { status: 401 }
       );
+    }
+
+    if (!isSupabaseConfigured()) {
+      return NOT_SUPPORTED_RESPONSE();
     }
 
     const body: ClaimAppRequest = await request.json();
@@ -183,6 +198,10 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    if (!isSupabaseConfigured()) {
+      return NOT_SUPPORTED_RESPONSE();
+    }
+
     const supabase = createServerClient();
     const mspTenantId = request.headers.get('X-MSP-Tenant-Id');
 
@@ -245,6 +264,10 @@ export async function PATCH(request: NextRequest) {
         { error: 'Authentication required' },
         { status: 401 }
       );
+    }
+
+    if (!isSupabaseConfigured()) {
+      return NOT_SUPPORTED_RESPONSE();
     }
 
     const body = await request.json();

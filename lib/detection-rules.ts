@@ -395,6 +395,7 @@ function getDefaultSilentArgs(type: WingetInstallerType): string {
     zip: '',
     pwa: '',
     portable: '',
+    chocolatey: '',
   };
 
   return defaults[type] || '';

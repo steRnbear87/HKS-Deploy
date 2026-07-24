@@ -15,6 +15,10 @@ services:
       # "supabase" - Uses Supabase (default, requires Supabase credentials)
       - DATABASE_MODE=${DATABASE_MODE:-supabase}
       - DATABASE_PATH=/data/intuneget.db
+      # Temporary demo override: points the self-hosted catalog reader at a
+      # local file instead of downloading the published snapshot (see
+      # lib/catalog/snapshot-store.ts). Remove this line to go back to normal.
+      - CATALOG_SNAPSHOT_FILE=${CATALOG_SNAPSHOT_FILE:-}
 
       # ===========================================
       # Packager Authentication (for SQLite mode)
@@ -41,6 +45,16 @@ services:
       - AZURE_AD_CLIENT_SECRET=${AZURE_AD_CLIENT_SECRET}
 
       # ===========================================
+      # Windows Update for Business reports (optional)
+      # ===========================================
+      # Log Analytics workspace ID for per-device Windows Update status on the
+      # Devices page. Requires the "Log Analytics Reader" Azure RBAC role
+      # granted directly on this workspace (Azure Portal -> workspace ->
+      # Access control (IAM)) - separate from the Graph app registration
+      # permissions above. Leave unset to show the "not configured" state.
+      - AZURE_LOG_ANALYTICS_WORKSPACE_ID=${AZURE_LOG_ANALYTICS_WORKSPACE_ID:-}
+
+      # ===========================================
       # Packager Mode
       # ===========================================
       # "local" - Use local Windows packager (recommended for self-hosting)
@@ -58,6 +72,13 @@ services:
       # Callback Security (for GitHub mode)
       # ===========================================
       - CALLBACK_SECRET=${CALLBACK_SECRET:-}
+
+      # ===========================================
+      # Cron Authentication
+      # ===========================================
+      # Bearer token required by GET /api/cron/* routes (update checks,
+      # deployment-drift, snapshot jobs). Generate with: openssl rand -hex 24
+      - CRON_SECRET=${CRON_SECRET:-}
 
       # ===========================================
       # Application URL

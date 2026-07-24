@@ -4,6 +4,7 @@ import { useState, useCallback } from 'react';
 import { useCartStore } from '@/stores/cart-store';
 import { generateDetectionRules, generateInstallCommand, generateUninstallCommand } from '@/lib/detection-rules';
 import { DEFAULT_PSADT_CONFIG, getDefaultProcessesToClose } from '@/types/psadt';
+import { buildChocolateyInstallCommand, buildChocolateyUninstallCommand, CHOCOLATEY_BOOTSTRAP_URL } from '@/lib/chocolatey-app';
 import { toast } from 'sonner';
 import type { NormalizedPackage } from '@/types/winget';
 
@@ -53,6 +54,61 @@ export function useQuickAdd(
                 const items = useCartStore.getState().items;
                 const addedItem = items.find(
                   (item) => item.wingetId === (pkg.packageIdentifier || pkg.id) && item.version === pkg.version
+                );
+                if (addedItem) {
+                  removeItem(addedItem.id);
+                }
+              },
+            },
+          });
+          return;
+        }
+
+        // Chocolatey apps: no winget manifest to fetch - the catalog row itself
+        // (name/publisher/version) is all that's needed, same as PackageConfig.tsx.
+        if (pkg.appSource === 'chocolatey') {
+          const installCommand = buildChocolateyInstallCommand(pkg.id, pkg.version);
+          const uninstallCommand = buildChocolateyUninstallCommand(pkg.id);
+          const detectionRules = generateDetectionRules(
+            { architecture: 'x64', url: CHOCOLATEY_BOOTSTRAP_URL, sha256: '', type: 'chocolatey', scope: 'machine' },
+            pkg.name,
+            pkg.id,
+            pkg.version
+          );
+
+          addItem({
+            appSource: 'win32',
+            sourceType: 'chocolatey',
+            wingetId: pkg.id,
+            displayName: pkg.name,
+            publisher: pkg.publisher,
+            description: pkg.description,
+            version: pkg.version,
+            architecture: 'x64',
+            installScope: 'machine',
+            installerType: 'chocolatey',
+            installerUrl: CHOCOLATEY_BOOTSTRAP_URL,
+            installerSha256: '',
+            installCommand,
+            uninstallCommand,
+            detectionRules,
+            psadtConfig: {
+              ...DEFAULT_PSADT_CONFIG,
+              detectionRules,
+              installCommand,
+              uninstallCommand,
+            },
+            iconPath: pkg.iconPath,
+          });
+
+          toast.success(`${pkg.name} added`, {
+            description: `v${pkg.version} -- Chocolatey`,
+            action: {
+              label: 'Undo',
+              onClick: () => {
+                const items = useCartStore.getState().items;
+                const addedItem = items.find(
+                  (item) => item.wingetId === pkg.id && item.version === pkg.version
                 );
                 if (addedItem) {
                   removeItem(addedItem.id);

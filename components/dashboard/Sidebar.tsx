@@ -12,26 +12,19 @@ import {
   X,
   Server,
   BarChart3,
-  Building2,
   ArrowUpCircle,
   Radar,
-  FolderSync,
-  Users,
-  ScrollText,
-  Layers,
-  Webhook,
+  Laptop,
   Lightbulb,
+  MonitorCog,
   PanelLeftClose,
   PanelLeftOpen,
-  History,
 } from 'lucide-react';
 import { T } from 'gt-next';
 import { cn } from '@/lib/utils';
-import { getClientFeatureFlags } from '@/lib/features';
 import { springPresets, staggerContainerFast } from '@/lib/animations/variants';
 import { useSidebarStore } from '@/stores/sidebar-store';
 import { useUserSettings } from '@/components/providers/UserSettingsProvider';
-import { useMspOptional } from '@/hooks/useMspOptional';
 import { UpdateBadge } from '@/components/inventory';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { SidebarNavItem } from './SidebarNavItem';
@@ -58,23 +51,15 @@ const coreNav: NavItem[] = [
 ];
 
 const managementNav: NavItem[] = [
-  { name: 'SCCM Migration', href: '/dashboard/sccm', icon: FolderSync },
+  { name: 'Devices', href: '/dashboard/devices', icon: Laptop },
   { name: 'Inventory', href: '/dashboard/inventory', icon: Server },
+  { name: 'Windows Updates', href: '/dashboard/windows-updates', icon: MonitorCog },
   { name: 'App Updates', href: '/dashboard/updates', icon: ArrowUpCircle, badge: <UpdateBadge /> },
 ];
 
 const analyticsNav: NavItem[] = [
   { name: 'Reports', href: '/dashboard/reports', icon: BarChart3 },
   { name: 'App Requests', href: '/dashboard/app-requests', icon: Lightbulb },
-];
-
-const mspNav: NavItem[] = [
-  { name: 'MSP Dashboard', href: '/dashboard/msp', icon: Building2 },
-  { name: 'Batch Deploy', href: '/dashboard/msp/batch', icon: Layers },
-  { name: 'Team', href: '/dashboard/msp/team', icon: Users },
-  { name: 'MSP Reports', href: '/dashboard/msp/reports', icon: BarChart3 },
-  { name: 'Webhooks', href: '/dashboard/msp/webhooks', icon: Webhook },
-  { name: 'Audit Logs', href: '/dashboard/msp/audit', icon: ScrollText },
 ];
 
 const reducedMotionStagger = {
@@ -90,7 +75,6 @@ interface SidebarProps {
 export function Sidebar({ user, onSignOut }: SidebarProps) {
   const { isCollapsed, toggleCollapse } = useSidebarStore();
   const { setSidebarCollapsed } = useUserSettings();
-  const { isMspUser } = useMspOptional();
   const prefersReducedMotion = useReducedMotion();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [mounted, setMounted] = useState(false);
@@ -106,19 +90,10 @@ export function Sidebar({ user, onSignOut }: SidebarProps) {
 
   const closeMobile = () => setMobileOpen(false);
 
-  // NEXT_PUBLIC_DISABLE_SCCM=true hides the SCCM Migration nav item
-  const { sccm: sccmEnabled } = getClientFeatureFlags();
-  const managementItems = sccmEnabled
-    ? managementNav
-    : managementNav.filter((item) => item.href !== '/dashboard/sccm');
-
   const navGroups: NavGroup[] = [
     { items: coreNav },
-    { label: 'Management', items: managementItems },
+    { label: 'Management', items: managementNav },
     { label: 'Analytics', items: analyticsNav },
-    ...(isMspUser
-      ? [{ label: 'MSP', items: mspNav }]
-      : [{ label: 'MSP', items: [{ name: 'MSP Dashboard', href: '/dashboard/msp', icon: Building2 }] }]),
   ];
 
   const sidebarContent = (
@@ -129,15 +104,25 @@ export function Sidebar({ user, onSignOut }: SidebarProps) {
         isCollapsed ? 'justify-center px-3' : 'justify-between px-4'
       )}>
         <Link href="/dashboard" className="group flex items-center gap-3">
-          <div className="relative w-9 h-9 rounded-lg overflow-hidden shadow-glow-cyan transition-shadow duration-300 group-hover:shadow-glow-cyan-lg flex-shrink-0">
+          {isCollapsed ? (
+            <div className="relative w-9 h-9 rounded-lg overflow-hidden shadow-glow-cyan transition-shadow duration-300 group-hover:shadow-glow-cyan-lg flex-shrink-0">
+              <Image
+                src="/favicon.svg"
+                alt="HKS App Deployment Logo"
+                width={36}
+                height={36}
+                className="w-full h-full"
+              />
+            </div>
+          ) : (
             <Image
-              src="/favicon.svg"
-              alt="IntuneGet Logo"
-              width={36}
-              height={36}
-              className="w-full h-full"
+              src="/hks-logo.png"
+              alt="HKS"
+              width={2478}
+              height={906}
+              className="h-7 w-auto object-contain flex-shrink-0"
             />
-          </div>
+          )}
           <AnimatePresence mode="wait">
             {!isCollapsed && (
               <motion.span
@@ -148,7 +133,7 @@ export function Sidebar({ user, onSignOut }: SidebarProps) {
                 transition={{ duration: 0.15 }}
                 className="text-xl font-bold text-text-primary tracking-tight whitespace-nowrap overflow-hidden"
               >
-                <T>IntuneGet</T>
+                <T>Deploy</T>
               </motion.span>
             )}
           </AnimatePresence>
@@ -231,17 +216,6 @@ export function Sidebar({ user, onSignOut }: SidebarProps) {
             </>
           )}
         </button>
-      </div>
-
-      {/* Changelog link */}
-      <div className="px-3 pb-1">
-        <SidebarNavItem
-          name={<T>Changelog</T>}
-          href="/changelog"
-          icon={History}
-          isCollapsed={isCollapsed}
-          onClick={closeMobile}
-        />
       </div>
 
       {/* User section */}

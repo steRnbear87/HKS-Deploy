@@ -5,8 +5,10 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerClient, isSupabaseConfigured } from '@/lib/supabase';
+import { resolveTargetTenantId } from '@/lib/msp/tenant-resolution';
 import { parseAccessToken } from '@/lib/auth-utils';
 import { compareVersions } from '@/lib/version-compare';
+import { getDatabase } from '@/lib/db';
 import type { AvailableUpdate } from '@/types/update-policies';
 
 /**
@@ -24,100 +26,67 @@ export async function GET(request: NextRequest) {
     }
 
     const searchParams = request.nextUrl.searchParams;
-    const tenantId = searchParams.get('tenant_id')?.trim() || null;
+    const requestedTenantId = searchParams.get('tenant_id')?.trim() || null;
     const includeDismissed = searchParams.get('include_dismissed') === 'true';
     const criticalOnly = searchParams.get('critical_only') === 'true';
     // By default only surface updates for IntuneGet-managed apps; fuzzy-matched
     // apps are opt-in to avoid accidentally updating mismatched/customized apps.
     const includeUnmanaged = searchParams.get('include_unmanaged') === 'true';
 
-    if (!isSupabaseConfigured()) {
-      return NextResponse.json({
-        updates: [],
-        count: 0,
-        criticalCount: 0,
+    let tenantId = user.tenantId;
+    if (isSupabaseConfigured()) {
+      const supabase = createServerClient();
+
+      const tenantResolution = await resolveTargetTenantId({
+        supabase,
+        userId: user.userId,
+        tokenTenantId: user.tenantId,
+        requestedTenantId,
       });
-    }
 
-    const supabase = createServerClient();
-
-    // Build query for update check results
-    let query = supabase
-      .from('update_check_results')
-      .select('*')
-      .eq('user_id', user.userId)
-      .order('detected_at', { ascending: false });
-
-    // Filter by tenant if specified
-    if (tenantId) {
-      query = query.eq('tenant_id', tenantId);
-    }
-
-    // Exclude dismissed unless requested
-    if (!includeDismissed) {
-      query = query.is('dismissed_at', null);
-    }
-
-    // Filter critical only
-    if (criticalOnly) {
-      query = query.eq('is_critical', true);
-    }
-
-    const { data: updates, error: updatesError } = await query;
-
-    if (updatesError) {
-      return NextResponse.json(
-        { error: 'Failed to fetch updates' },
-        { status: 500 }
-      );
-    }
-
-    if (!updates || updates.length === 0) {
-      return NextResponse.json({
-        updates: [],
-        count: 0,
-        criticalCount: 0,
-      });
-    }
-
-    // Get policies for these updates
-    const wingetIds = [...new Set(updates.map((u) => u.winget_id))];
-    let policiesQuery = supabase
-      .from('app_update_policies')
-      .select('id, winget_id, tenant_id, policy_type, is_enabled, pinned_version, last_auto_update_at, last_auto_update_version, consecutive_failures')
-      .eq('user_id', user.userId)
-      .in('winget_id', wingetIds);
-
-    if (tenantId) {
-      policiesQuery = policiesQuery.eq('tenant_id', tenantId);
-    }
-
-    const { data: policies } = await policiesQuery;
-
-    // Query upload_history to determine which apps were deployed through IntuneGet
-    let deployedQuery = supabase
-      .from('upload_history')
-      .select('winget_id, intune_tenant_id')
-      .eq('user_id', user.userId)
-      .in('winget_id', wingetIds);
-
-    if (tenantId) {
-      deployedQuery = deployedQuery.eq('intune_tenant_id', tenantId);
-    }
-
-    const { data: deployedApps } = await deployedQuery;
-
-    const deployedSet = new Set<string>();
-    if (deployedApps) {
-      for (const d of deployedApps) {
-        deployedSet.add(`${d.winget_id}:${d.intune_tenant_id}`);
+      if (tenantResolution.errorResponse) {
+        return tenantResolution.errorResponse;
       }
+
+      tenantId = tenantResolution.tenantId;
+    } else if (requestedTenantId) {
+      tenantId = requestedTenantId;
     }
 
-    // Create policy lookup
+    const db = getDatabase();
+    const updates = await db.updateCheckResults.getByUserId(user.userId, {
+      tenantId,
+      includeDismissed,
+      criticalOnly,
+    });
+
+    if (updates.length === 0) {
+      return NextResponse.json({
+        updates: [],
+        count: 0,
+        criticalCount: 0,
+      });
+    }
+
+    const wingetIds = [...new Set(updates.map((u) => u.winget_id))];
+
+    // Policy info (ignore/pin/auto-update tracking) is Supabase-only - no
+    // policies exist in self-hosted mode, so every update is unrestricted.
     const policyMap = new Map<string, AvailableUpdate['policy']>();
-    if (policies) {
-      policies.forEach((policy) => {
+    if (isSupabaseConfigured()) {
+      const supabase = createServerClient();
+      let policiesQuery = supabase
+        .from('app_update_policies')
+        .select('id, winget_id, tenant_id, policy_type, is_enabled, pinned_version, last_auto_update_at, last_auto_update_version, consecutive_failures')
+        .eq('user_id', user.userId)
+        .in('winget_id', wingetIds);
+
+      if (tenantId) {
+        policiesQuery = policiesQuery.eq('tenant_id', tenantId);
+      }
+
+      const { data: policies } = await policiesQuery;
+      policies?.forEach((policy) => {
         const key = `${policy.winget_id}:${policy.tenant_id}`;
         policyMap.set(key, {
           id: policy.id,
@@ -131,15 +100,42 @@ export async function GET(request: NextRequest) {
       });
     }
 
+    // Determine which apps were deployed through IntuneGet, for has_prior_deployment.
+    const deployedSet = new Set<string>();
+    const uploadHistory = await db.uploadHistory.getByUserId(user.userId, 500);
+    for (const record of uploadHistory) {
+      if (wingetIds.includes(record.winget_id)) {
+        deployedSet.add(`${record.winget_id}:${record.intune_tenant_id}`);
+      }
+    }
+
+    // Rollout/drift status, computed daily by the cron for managed apps only
+    // (see lib/intune/deployment-drift.ts) - keyed by the exact Intune app
+    // object drift was scanned against, same key update_check_results uses.
+    const driftRows = await db.deploymentDrift.getByUserId(user.userId, { tenantId });
+    const driftMap = new Map(driftRows.map((row) => [`${row.winget_id}:${row.intune_app_id}`, row]));
+
     // Combine updates with policy info and filter out Unknown versions
     const updatesWithPolicies: AvailableUpdate[] = updates
       .map((update) => {
         const policyKey = `${update.winget_id}:${update.tenant_id}`;
+        const driftRow = driftMap.get(`${update.winget_id}:${update.intune_app_id}`);
         return {
           ...update,
           is_managed: update.is_managed ?? true,
           has_prior_deployment: deployedSet.has(policyKey),
           policy: policyMap.get(policyKey) || null,
+          rollout: driftRow
+            ? {
+                expectedVersion: driftRow.expected_version,
+                totalScanned: driftRow.total_devices_scanned,
+                onExpected: driftRow.on_expected_count,
+                behind: driftRow.behind_count,
+                ahead: driftRow.ahead_count,
+                partial: driftRow.partial,
+                scannedAt: driftRow.scanned_at,
+              }
+            : null,
         };
       })
       .filter((u) => u.current_version !== 'Unknown')
@@ -194,39 +190,15 @@ export async function PATCH(request: NextRequest) {
       );
     }
 
-    if (!isSupabaseConfigured()) {
-      return NextResponse.json(
-        {
-          error:
-            'Update dismissal requires Supabase and is not available on this self-hosted deployment',
-        },
-        { status: 503 }
-      );
-    }
-
-    const supabase = createServerClient();
-
-    const updateData = {
-      dismissed_at: action === 'dismiss' ? new Date().toISOString() : null,
-      updated_at: new Date().toISOString(),
-    };
-
-    const { error } = await supabase
-      .from('update_check_results')
-      .update(updateData)
-      .in('id', update_ids)
-      .eq('user_id', user.userId);
-
-    if (error) {
-      return NextResponse.json(
-        { error: 'Failed to update updates' },
-        { status: 500 }
-      );
-    }
+    const updated = await getDatabase().updateCheckResults.setDismissed(
+      update_ids,
+      user.userId,
+      action === 'dismiss'
+    );
 
     return NextResponse.json({
       success: true,
-      updated: update_ids.length,
+      updated,
       action,
     });
   } catch {

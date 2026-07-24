@@ -311,7 +311,7 @@ $registryMarkerPath = $registryMarkerPath -replace '^(HKLM|HKCU|HKEY_LOCAL_MACHI
 $registryMarkerPath = $registryMarkerPath -replace '[*?"''<>|\x00-\x1f]', ''
 $markerSegments = @($registryMarkerPath -split '\\' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 $registryMarkerPath = $markerSegments -join '\'
-if ([string]::IsNullOrWhiteSpace($registryMarkerPath)) { $registryMarkerPath = 'SOFTWARE\IntuneGet\Apps' }
+if ([string]::IsNullOrWhiteSpace($registryMarkerPath)) { $registryMarkerPath = 'SOFTWARE\HKS\Apps' }
 # Escape for single-quoted embedding in the generated script (quotes are already
 # stripped by normalization, this is defense in depth)
 $registryMarkerPathEscaped = $registryMarkerPath -replace "'", "''"
@@ -364,8 +364,8 @@ if (Use-PSADTBrandAsset -Source $brandingBannerPath -TargetName $bannerTarget -P
 if ($IsUserScope) {
     # Use literal path since .psd1 files load in restricted language mode
     # where PSADT runtime variables like $envProgramData are not available
-    Update-PowerShellDataSetting -Path $configPath -Section 'Toolkit' -Setting 'LogPath' -ValueLiteral "'C:\ProgramData\IntuneGet\Logs'"
-    Write-Host "User-scope: Log directory overridden to C:\ProgramData\IntuneGet\Logs"
+    Update-PowerShellDataSetting -Path $configPath -Section 'Toolkit' -Setting 'LogPath' -ValueLiteral "'C:\ProgramData\HKS\Logs'"
+    Write-Host "User-scope: Log directory overridden to C:\ProgramData\HKS\Logs"
 }
 
 # Auto-detect installer type from file extension (override incorrect manifest data)
@@ -824,7 +824,7 @@ $lines = @(
     '    AppRebootExitCodes = @(1641, 3010)'
     '    AppScriptVersion = ''1.0.0'''
     '    AppScriptDate = (Get-Date -Format ''yyyy-MM-dd'')'
-    '    AppScriptAuthor = ''IntuneGet'''
+    '    AppScriptAuthor = ''HKS'''
     "    RequireAdmin = `$$(-not $IsUserScope)"
     '    InstallName = '''''
     '    InstallTitle = '''''
@@ -951,7 +951,7 @@ if (-not [string]::IsNullOrWhiteSpace($customInstallCommand)) {
                 $lines += @(
                     ''
                     '    # Extract the zip archive to a unique temp directory and run the nested installer'
-                    '    $zipExtractDir = [System.IO.Path]::Combine($env:TEMP, "IntuneGet_Zip_" + [System.Guid]::NewGuid().ToString("N").Substring(0, 8))'
+                    '    $zipExtractDir = [System.IO.Path]::Combine($env:TEMP, "HKSDeploy_Zip_" + [System.Guid]::NewGuid().ToString("N").Substring(0, 8))'
                     '    $null = New-Item -Path $zipExtractDir -ItemType Directory -Force'
                     '    try {'
                     '        Write-ADTLogEntry -Message "Extracting zip archive to: $zipExtractDir" -Severity ''Info'' -Source ''Install-ADTDeployment'''
@@ -1015,7 +1015,7 @@ if (-not [string]::IsNullOrWhiteSpace($customInstallCommand)) {
                     '    # Per-user installer - copy to user temp directory first'
                     '    # Some installers (Spotify, etc.) fail from IMECache system directory'
                     "    `$installerSource = `"`$(`$adtSession.DirFiles)\$installerFileName`""
-                    '    $userTempDir = [System.IO.Path]::Combine($env:TEMP, "IntuneGet_" + [System.Guid]::NewGuid().ToString("N").Substring(0, 8))'
+                    '    $userTempDir = [System.IO.Path]::Combine($env:TEMP, "HKSDeploy_" + [System.Guid]::NewGuid().ToString("N").Substring(0, 8))'
                     '    $null = New-Item -Path $userTempDir -ItemType Directory -Force'
                     "    `$installerDest = Join-Path `$userTempDir '$installerFileNameSingleQuoteEscaped'"
                     '    Write-ADTLogEntry -Message "Copying installer to user temp: $installerDest" -Severity ''Info'' -Source ''Install-ADTDeployment'''
@@ -1088,7 +1088,7 @@ if ($IsUserScope) {
     # User-scope: Write to all user hives via Invoke-ADTAllUsersRegistryAction (handles SYSTEM context)
     $lines += @(
         ''
-        '    # Write IntuneGet detection marker to all user registry hives'
+        '    # Write HKS App Deployment detection marker to all user registry hives'
         '    try {'
         '        Invoke-ADTAllUsersRegistryAction -ScriptBlock {'
         "            Set-ADTRegistryKey -LiteralPath 'HKCU\$registryMarkerPathEscaped\$sanitizedWingetId' -Name 'DisplayName' -Value '$displayNameEscaped' -Type String -SID `$_.SID"
@@ -1097,7 +1097,7 @@ if ($IsUserScope) {
         "            Set-ADTRegistryKey -LiteralPath 'HKCU\$registryMarkerPathEscaped\$sanitizedWingetId' -Name 'WingetId' -Value '$WingetId' -Type String -SID `$_.SID"
         '            Set-ADTRegistryKey -LiteralPath ''HKCU\' + $registryMarkerPathEscaped + '\' + $sanitizedWingetId + ''' -Name ''InstalledDate'' -Value (Get-Date -Format ''o'') -Type String -SID $_.SID'
         '        }'
-        '        Write-ADTLogEntry -Message "IntuneGet detection marker written to all user hives" -Severity ''Success'' -Source ''Install-ADTDeployment'''
+        '        Write-ADTLogEntry -Message "HKS App Deployment detection marker written to all user hives" -Severity ''Success'' -Source ''Install-ADTDeployment'''
         '    } catch {'
         '        Write-ADTLogEntry -Message "Warning: Could not write detection marker to user hives: $_" -Severity ''Warning'' -Source ''Install-ADTDeployment'''
         '    }'
@@ -1106,7 +1106,7 @@ if ($IsUserScope) {
     # Machine-scope: Write to HKLM
     $lines += @(
         ''
-        '    # Write IntuneGet detection marker to HKLM (machine-scope app)'
+        '    # Write HKS App Deployment detection marker to HKLM (machine-scope app)'
         '    try {'
         "        `$regPath = 'HKLM\$registryMarkerPathEscaped\$sanitizedWingetId'"
         "        Set-ADTRegistryKey -LiteralPath `$regPath -Name 'DisplayName' -Value '$displayNameEscaped' -Type String"
@@ -1114,7 +1114,7 @@ if ($IsUserScope) {
         "        Set-ADTRegistryKey -LiteralPath `$regPath -Name 'Publisher' -Value '$publisherEscaped' -Type String"
         "        Set-ADTRegistryKey -LiteralPath `$regPath -Name 'WingetId' -Value '$WingetId' -Type String"
         '        Set-ADTRegistryKey -LiteralPath $regPath -Name ''InstalledDate'' -Value (Get-Date -Format ''o'') -Type String'
-        '        Write-ADTLogEntry -Message "IntuneGet detection marker written to HKLM registry" -Severity ''Success'' -Source ''Install-ADTDeployment'''
+        '        Write-ADTLogEntry -Message "HKS App Deployment detection marker written to HKLM registry" -Severity ''Success'' -Source ''Install-ADTDeployment'''
         '    } catch {'
         '        Write-ADTLogEntry -Message "Warning: Could not write detection marker: $_" -Severity ''Warning'' -Source ''Install-ADTDeployment'''
         '    }'
@@ -1292,12 +1292,12 @@ if ($IsUserScope) {
     # User-scope: enumerate all user hives to remove marker (handles SYSTEM context)
     $lines += @(
         ''
-        '    # Remove IntuneGet detection marker from all user registry hives'
+        '    # Remove HKS App Deployment detection marker from all user registry hives'
         '    try {'
         '        Invoke-ADTAllUsersRegistryAction -ScriptBlock {'
         "            Remove-ADTRegistryKey -LiteralPath 'HKCU\$registryMarkerPathEscaped\$sanitizedWingetId' -SID `$_.SID -Recurse -ErrorAction SilentlyContinue"
         '        }'
-        '        Write-ADTLogEntry -Message "IntuneGet detection marker cleanup completed across all user hives" -Severity ''Success'' -Source ''Uninstall-ADTDeployment'''
+        '        Write-ADTLogEntry -Message "HKS App Deployment detection marker cleanup completed across all user hives" -Severity ''Success'' -Source ''Uninstall-ADTDeployment'''
         '    } catch {'
         '        Write-ADTLogEntry -Message "Warning: Could not enumerate user hives for marker cleanup: $_" -Severity ''Warning'' -Source ''Uninstall-ADTDeployment'''
         '    }'
@@ -1314,12 +1314,12 @@ if ($IsUserScope) {
     # Machine-scope: marker is only in HKLM
     $lines += @(
         ''
-        '    # Remove IntuneGet detection marker from HKLM'
+        '    # Remove HKS App Deployment detection marker from HKLM'
         '    try {'
         "        `$regPathHKLM = 'HKLM\$registryMarkerPathEscaped\$sanitizedWingetId'"
         '        if (Test-Path -LiteralPath ''Registry::HKEY_LOCAL_MACHINE\' + $registryMarkerPathEscaped + '\' + $sanitizedWingetId + ''' -PathType Container) {'
         '            Remove-ADTRegistryKey -LiteralPath $regPathHKLM -Recurse'
-        '            Write-ADTLogEntry -Message "IntuneGet detection marker removed from HKLM" -Severity ''Success'' -Source ''Uninstall-ADTDeployment'''
+        '            Write-ADTLogEntry -Message "HKS App Deployment detection marker removed from HKLM" -Severity ''Success'' -Source ''Uninstall-ADTDeployment'''
         '        }'
         '    } catch {'
         '        Write-ADTLogEntry -Message "Warning: Could not remove detection marker: $_" -Severity ''Warning'' -Source ''Uninstall-ADTDeployment'''

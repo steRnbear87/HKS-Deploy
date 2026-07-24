@@ -104,8 +104,28 @@ export function AppIcon({
         />
       )}
 
-      {/* Actual image - using Next.js Image for automatic AVIF/WebP conversion */}
-      {!imageError && (
+      {/* Actual image - using Next.js Image for automatic AVIF/WebP conversion.
+          External icons (e.g. Chocolatey packages, hosted on whatever CDN the
+          package maintainer picked) come from hostnames that can't practically
+          be allowlisted in next.config.js's remotePatterns the way the small,
+          fixed set of Microsoft Store domains can - a plain <img> sidesteps
+          that restriction entirely, at the cost of no server-side re-encoding
+          for those icons specifically. */}
+      {!imageError && isExternalUrl && (
+        <img
+          src={iconUrl}
+          alt={packageName}
+          width={imageSize}
+          height={imageSize}
+          className={cn(
+            'object-contain transition-opacity duration-200',
+            imageLoaded ? 'opacity-100' : 'opacity-0'
+          )}
+          onError={handleError}
+          onLoad={handleLoad}
+        />
+      )}
+      {!imageError && !isExternalUrl && (
         <Image
           src={iconUrl}
           alt={packageName}

@@ -29,7 +29,7 @@ describe('generateDetectionRules', () => {
       expect(rules).toHaveLength(1);
       expect(rules[0].type).toBe('registry');
       const regRule = rules[0] as RegistryDetectionRule;
-      expect(regRule.keyPath).toBe('HKEY_LOCAL_MACHINE\\SOFTWARE\\IntuneGet\\Apps\\Google_Chrome');
+      expect(regRule.keyPath).toBe('HKEY_LOCAL_MACHINE\\SOFTWARE\\HKS\\Apps\\Google_Chrome');
       expect(regRule.valueName).toBe('Version');
       expect(regRule.detectionType).toBe('version');
       expect(regRule.operator).toBe('greaterThanOrEqual');
@@ -51,7 +51,7 @@ describe('generateDetectionRules', () => {
       expect(rules).toHaveLength(1);
       expect(rules[0].type).toBe('registry');
       const regRule = rules[0] as RegistryDetectionRule;
-      expect(regRule.keyPath).toBe('HKEY_CURRENT_USER\\SOFTWARE\\IntuneGet\\Apps\\Publisher_TestApp');
+      expect(regRule.keyPath).toBe('HKEY_CURRENT_USER\\SOFTWARE\\HKS\\Apps\\Publisher_TestApp');
     });
 
     it('should use registry marker for WiX installers with wingetId and version', () => {
@@ -135,7 +135,7 @@ describe('generateDetectionRules', () => {
       expect(rules).toHaveLength(1);
       expect(rules[0].type).toBe('registry');
       const regRule = rules[0] as RegistryDetectionRule;
-      expect(regRule.keyPath).toBe('HKEY_LOCAL_MACHINE\\SOFTWARE\\IntuneGet\\Apps\\Publisher_TestApp');
+      expect(regRule.keyPath).toBe('HKEY_LOCAL_MACHINE\\SOFTWARE\\HKS\\Apps\\Publisher_TestApp');
       expect(regRule.valueName).toBe('Version');
       expect(regRule.detectionType).toBe('version');
       expect(regRule.operator).toBe('greaterThanOrEqual');
@@ -280,7 +280,7 @@ describe('generateDetectionRules', () => {
       const rules = generateDetectionRules(installer, 'Test App', 'Publisher.TestApp', '1.0.0', '');
 
       const regRule = rules[0] as RegistryDetectionRule;
-      expect(regRule.keyPath).toBe('HKEY_LOCAL_MACHINE\\SOFTWARE\\IntuneGet\\Apps\\Publisher_TestApp');
+      expect(regRule.keyPath).toBe('HKEY_LOCAL_MACHINE\\SOFTWARE\\HKS\\Apps\\Publisher_TestApp');
     });
   });
 

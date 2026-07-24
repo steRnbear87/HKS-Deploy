@@ -10,8 +10,10 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { createServerClient } from '@/lib/supabase';
+import { createServerClient, isSupabaseConfigured } from '@/lib/supabase';
 import { resolveTargetTenantId } from '@/lib/msp/tenant-resolution';
+import { checkStoredConsent } from '@/lib/msp/consent-cache';
+import { verifyTenantConsent } from '@/lib/msp/consent-verification';
 import { parseAccessToken } from '@/lib/auth-utils';
 import {
   GRAPH_API_BASE,
@@ -126,55 +128,77 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Missing appId parameter' }, { status: 400 });
     }
 
-    const supabase = createServerClient();
-    const mspTenantId = request.headers.get('X-MSP-Tenant-Id');
+    // MSP tenant resolution and the tenant_consent/discovered_apps_cache tables
+    // are Supabase-only (hosted) concerns; self-hosted SQLite installs use the
+    // signed-in user's own tenant, verify consent live via Graph, and skip the
+    // merged-version-ids cache (falling back to the single requested appId).
+    let tenantId = user.tenantId;
+    let allVersionIds = [appId];
+    let summedDeviceCount: number | undefined;
 
-    const tenantResolution = await resolveTargetTenantId({
-      supabase,
-      userId: user.userId,
-      tokenTenantId: user.tenantId,
-      requestedTenantId: mspTenantId,
-    });
+    if (isSupabaseConfigured()) {
+      const supabase = createServerClient();
+      const mspTenantId = request.headers.get('X-MSP-Tenant-Id');
 
-    if (tenantResolution.errorResponse) {
-      return tenantResolution.errorResponse;
+      const tenantResolution = await resolveTargetTenantId({
+        supabase,
+        userId: user.userId,
+        tokenTenantId: user.tenantId,
+        requestedTenantId: mspTenantId,
+      });
+
+      if (tenantResolution.errorResponse) {
+        return tenantResolution.errorResponse;
+      }
+
+      tenantId = tenantResolution.tenantId;
+
+      // Verify admin consent (mirrors the unmanaged-apps route)
+      const { data: consentData, error: consentError } = await supabase
+        .from('tenant_consent')
+        .select('*')
+        .eq('tenant_id', tenantId)
+        .eq('is_active', true)
+        .single();
+
+      if (consentError || !consentData) {
+        return NextResponse.json(
+          { error: 'Admin consent not found. Please complete the admin consent flow.' },
+          { status: 403 }
+        );
+      }
+
+      // Resolve the full set of detected-app (version) ids for this app from the
+      // sync cache; fall back to the single id for rows written before this field
+      // existed or evicted rows.
+      const { data: cacheRow } = await supabase
+        .from('discovered_apps_cache')
+        .select('app_data, device_count')
+        .eq('tenant_id', tenantId)
+        .eq('discovered_app_id', appId)
+        .maybeSingle();
+
+      const appData = (cacheRow?.app_data ?? null) as unknown as { mergedAppIds?: string[] } | null;
+      if (appData?.mergedAppIds && appData.mergedAppIds.length > 0) {
+        allVersionIds = appData.mergedAppIds;
+      }
+      summedDeviceCount = cacheRow?.device_count ?? undefined;
+    } else {
+      const hasCachedConsent = await checkStoredConsent(tenantId);
+      const consentResult = hasCachedConsent
+        ? { verified: true }
+        : await verifyTenantConsent(tenantId);
+
+      if (!consentResult.verified) {
+        return NextResponse.json(
+          { error: 'Admin consent not found. Please complete the admin consent flow.' },
+          { status: 403 }
+        );
+      }
     }
 
-    const tenantId = tenantResolution.tenantId;
-
-    // Verify admin consent (mirrors the unmanaged-apps route)
-    const { data: consentData, error: consentError } = await supabase
-      .from('tenant_consent')
-      .select('*')
-      .eq('tenant_id', tenantId)
-      .eq('is_active', true)
-      .single();
-
-    if (consentError || !consentData) {
-      return NextResponse.json(
-        { error: 'Admin consent not found. Please complete the admin consent flow.' },
-        { status: 403 }
-      );
-    }
-
-    // Resolve the full set of detected-app (version) ids for this app from the
-    // sync cache; fall back to the single id for rows written before this field
-    // existed or evicted rows.
-    const { data: cacheRow } = await supabase
-      .from('discovered_apps_cache')
-      .select('app_data, device_count')
-      .eq('tenant_id', tenantId)
-      .eq('discovered_app_id', appId)
-      .maybeSingle();
-
-    const appData = (cacheRow?.app_data ?? null) as unknown as { mergedAppIds?: string[] } | null;
-    const allVersionIds =
-      appData?.mergedAppIds && appData.mergedAppIds.length > 0
-        ? appData.mergedAppIds
-        : [appId];
     const truncated = allVersionIds.length > MAX_VERSIONS;
     const versionIds = truncated ? allVersionIds.slice(0, MAX_VERSIONS) : allVersionIds;
-    const summedDeviceCount = cacheRow?.device_count ?? undefined;
 
     const token = await getServicePrincipalToken(tenantId);
     if (!token) {

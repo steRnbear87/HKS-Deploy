@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 
 /**
- * IntuneGet Packager - Local Windows packaging service
+ * HKS App Deployment Packager - Local Windows packaging service
  *
- * This service enables true self-hosting of IntuneGet by providing
- * a local alternative to the GitHub Actions packaging pipeline.
+ * This service enables true self-hosting of HKS App Deployment (built on
+ * the open-source IntuneGet project) by providing a local alternative to
+ * the GitHub Actions packaging pipeline.
  *
  * Usage:
  *   npx @ugurkocde/intuneget-packager
@@ -32,7 +33,7 @@ async function main() {
 
   program
     .name('intuneget-packager')
-    .description('IntuneGet local packaging service for Windows')
+    .description('HKS App Deployment local packaging service for Windows')
     .version(packageJson.version)
     .option('-v, --verbose', 'Enable verbose logging')
     .option('-d, --debug', 'Enable debug logging')
@@ -47,7 +48,7 @@ async function main() {
 
       console.log(`
 ================================================================================
-  IntuneGet Packager v${packageJson.version}
+  HKS App Deployment Packager v${packageJson.version}
   Local Windows packaging service for true self-hosting
 ================================================================================
 `);

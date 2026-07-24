@@ -83,7 +83,7 @@ export function FilterPermissionNudge() {
             Enable Intune assignment filters
           </h3>
           <p className="text-sm text-text-secondary mb-4">
-            To use assignment filters when deploying apps, IntuneGet needs the{' '}
+            To use assignment filters when deploying apps, HKS App Deployment needs the{' '}
             <code className="text-amber-600 bg-amber-500/10 px-1 rounded">
               DeviceManagementConfiguration.Read.All
             </code>{' '}

@@ -9,7 +9,9 @@ import { createServerClient, isSupabaseConfigured } from '@/lib/supabase';
 import { parseAccessToken } from '@/lib/auth-utils';
 import { resolveTargetTenantId } from '@/lib/msp/tenant-resolution';
 import { GET as getLiveIntuneUpdates } from '@/app/api/intune/apps/updates/route';
+import { filterUpdatesByPolicy } from '@/lib/intune/live-app-updates';
 import { notifyUserOfPendingUpdates } from '@/lib/notifications/notify-user';
+import { getDatabase } from '@/lib/db';
 import type { AppUpdateInfo } from '@/types/inventory';
 
 interface RefreshRequestBody {
@@ -24,12 +26,6 @@ interface LiveUpdatesResponse {
     wingetId: string | null;
     result: string;
   }>;
-}
-
-interface UpdateCheckRow {
-  id: string;
-  winget_id: string;
-  intune_app_id: string;
 }
 
 function isCriticalUpdate(currentVersion: string, latestVersion: string): boolean {
@@ -52,27 +48,25 @@ export async function POST(request: NextRequest) {
     const body = (await request.json().catch(() => ({}))) as RefreshRequestBody;
     const requestedTenantId = body.tenant_id?.trim() || null;
 
-    if (!isSupabaseConfigured()) {
-      return NextResponse.json(
-        { error: 'Update checking requires Supabase and is not available on this self-hosted deployment' },
-        { status: 503 }
-      );
+    const supabase = isSupabaseConfigured() ? createServerClient() : null;
+
+    let tenantId = user.tenantId;
+    if (supabase) {
+      const tenantResolution = await resolveTargetTenantId({
+        supabase,
+        userId: user.userId,
+        tokenTenantId: user.tenantId,
+        requestedTenantId,
+      });
+
+      if (tenantResolution.errorResponse) {
+        return tenantResolution.errorResponse;
+      }
+
+      tenantId = tenantResolution.tenantId;
+    } else if (requestedTenantId) {
+      tenantId = requestedTenantId;
     }
-
-    const supabase = createServerClient();
-
-    const tenantResolution = await resolveTargetTenantId({
-      supabase,
-      userId: user.userId,
-      tokenTenantId: user.tenantId,
-      requestedTenantId,
-    });
-
-    if (tenantResolution.errorResponse) {
-      return tenantResolution.errorResponse;
-    }
-
-    const tenantId = tenantResolution.tenantId;
 
     if (!authHeader) {
       return NextResponse.json(
@@ -104,18 +98,24 @@ export async function POST(request: NextRequest) {
     const liveData = (await liveResponse.json()) as LiveUpdatesResponse;
     const now = new Date().toISOString();
 
+    // Respect ignore/pin_version policies before persisting - without this,
+    // an app the user explicitly ignored or pinned would reappear on refresh.
+    // No-ops in self-hosted mode (no policies table there).
+    liveData.updates = await filterUpdatesByPolicy(supabase, user.userId, tenantId, liveData.updates);
+
+    const db = getDatabase();
+
     // Load the prior rows so the upsert can preserve notified_at for unchanged
     // updates but reset it to null when latest_version changed. Without the
     // reset, a row that was already notified for an older version keeps its
     // notified_at and the next version bump is never notified.
-    const { data: priorRows } = await supabase
-      .from('update_check_results')
-      .select('winget_id, intune_app_id, latest_version, notified_at')
-      .eq('user_id', user.userId)
-      .eq('tenant_id', tenantId);
+    const priorRows = await db.updateCheckResults.getByUserId(user.userId, {
+      tenantId,
+      includeDismissed: true,
+    });
     const priorMap = new Map<string, { latest_version: string; notified_at: string | null }>();
-    (priorRows as Array<{ winget_id: string; intune_app_id: string; latest_version: string; notified_at: string | null }> | null)?.forEach(
-      (r) => priorMap.set(`${r.winget_id}:${r.intune_app_id}`, { latest_version: r.latest_version, notified_at: r.notified_at })
+    priorRows.forEach((r) =>
+      priorMap.set(`${r.winget_id}:${r.intune_app_id}`, { latest_version: r.latest_version, notified_at: r.notified_at })
     );
 
     const rows = liveData.updates
@@ -138,19 +138,18 @@ export async function POST(request: NextRequest) {
           large_icon_type: update.intuneApp.largeIcon?.type || null,
           large_icon_value: update.intuneApp.largeIcon?.value || null,
           notified_at: notifiedAt,
+          dismissed_at: null,
           detected_at: now,
           updated_at: now,
         };
       });
 
     if (rows.length > 0) {
-      const { error: upsertError } = await supabase
-        .from('update_check_results')
-        .upsert(rows, { onConflict: 'user_id,tenant_id,winget_id,intune_app_id' });
-
-      if (upsertError) {
+      try {
+        await db.updateCheckResults.upsertMany(rows);
+      } catch (error) {
         return NextResponse.json(
-          { error: `Failed to store updates: ${upsertError.message}` },
+          { error: `Failed to store updates: ${error instanceof Error ? error.message : 'Unknown error'}` },
           { status: 500 }
         );
       }
@@ -160,32 +159,21 @@ export async function POST(request: NextRequest) {
       rows.map((row) => `${row.winget_id}:${row.intune_app_id}`)
     );
 
-    const { data: existingRows, error: existingRowsError } = await supabase
-      .from('update_check_results')
-      .select('id, winget_id, intune_app_id')
-      .eq('user_id', user.userId)
-      .eq('tenant_id', tenantId);
+    const existingRows = await db.updateCheckResults.getByUserId(user.userId, {
+      tenantId,
+      includeDismissed: true,
+    });
 
-    if (existingRowsError) {
-      return NextResponse.json(
-        { error: `Failed to load existing updates: ${existingRowsError.message}` },
-        { status: 500 }
-      );
-    }
-
-    const staleIds = (existingRows as UpdateCheckRow[] || [])
+    const staleIds = existingRows
       .filter((row) => !activeKeys.has(`${row.winget_id}:${row.intune_app_id}`))
       .map((row) => row.id);
 
     if (staleIds.length > 0) {
-      const { error: deleteError } = await supabase
-        .from('update_check_results')
-        .delete()
-        .in('id', staleIds);
-
-      if (deleteError) {
+      try {
+        await db.updateCheckResults.deleteByIds(staleIds);
+      } catch (error) {
         return NextResponse.json(
-          { error: `Failed to remove stale updates: ${deleteError.message}` },
+          { error: `Failed to remove stale updates: ${error instanceof Error ? error.message : 'Unknown error'}` },
           { status: 500 }
         );
       }
@@ -196,9 +184,11 @@ export async function POST(request: NextRequest) {
     // now instead of waiting for the daily cron. Force-send regardless of the
     // user's email frequency, since they just ran an on-demand check. Failures
     // here must not fail the refresh; the daily cron remains the backstop.
+    // Notifications are a Supabase-only feature (notification_preferences,
+    // webhook_configurations) - skipped entirely in self-hosted mode.
     const hasPendingNotifications = rows.some((row) => row.notified_at === null);
     let notified: { emailsSent: number; webhooksSent: number } | undefined;
-    if (hasPendingNotifications) {
+    if (hasPendingNotifications && supabase) {
       try {
         const res = await notifyUserOfPendingUpdates(supabase, user.userId, {
           respectFrequency: false,

@@ -395,7 +395,7 @@ export function ConsentStep({ onNext, onBack }: ConsentStepProps) {
         <T>To deploy apps to your Intune tenant, a{' '}
         <strong className="text-amber-600">Global Administrator</strong> or{' '}
         <strong className="text-amber-600">Privileged Role Administrator</strong>{' '}
-        must grant permission for IntuneGet to access your organization.</T>
+        must grant permission for HKS App Deployment to access your organization.</T>
       </p>
 
       {/* Role selection question */}
@@ -465,7 +465,7 @@ export function ConsentStep({ onNext, onBack }: ConsentStepProps) {
                   <strong className="text-text-secondary"><T>What to tell your admin:</T></strong>
                 </p>
                 <p className="text-xs text-text-muted">
-                  <T>"I need you to approve IntuneGet for our organization. Please click this link and sign in with your Global Admin account to grant the required permissions."</T>
+                  <T>"I need you to approve HKS App Deployment for our organization. Please click this link and sign in with your Global Admin account to grant the required permissions."</T>
                 </p>
               </div>
 

@@ -319,7 +319,7 @@ function normalizeCuratedApp(app: CuratedAppRpcRow): CuratedPackage {
     iconPath: app.icon_path ?? undefined,
     category: app.category ?? undefined,
     popularityRank: app.popularity_rank ?? undefined,
-    appSource: app.app_source === 'store' ? 'store' : 'win32',
+    appSource: app.app_source === 'store' ? 'store' : app.app_source === 'chocolatey' ? 'chocolatey' : 'win32',
     packageIdentifier: app.store_package_id ?? undefined,
   };
 }

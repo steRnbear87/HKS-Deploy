@@ -1,5 +1,5 @@
-/** IntuneGet marker included in managed app descriptions. */
-export const INTUNE_APP_SOURCE_MARKER = 'Source: IntuneGet.com';
+/** HKS App Deployment marker included in managed app descriptions. */
+export const INTUNE_APP_SOURCE_MARKER = 'Source: HKS App Deployment';
 
 export interface DuplicateAppInfo {
   matchType: 'exact';
@@ -51,7 +51,7 @@ function graphPathFromNextLink(nextLink: string): string {
 }
 
 /**
- * Find a committed, published IntuneGet Win32 app with the same display name
+ * Find a committed, published HKS App Deployment Win32 app with the same display name
  * and source fingerprint. The collection query selects only base mobileApp
  * fields; Win32-only fields are read from an individual polymorphic resource.
  */

@@ -113,6 +113,18 @@ export default function UpdatesPage() {
     hasMore: hasMoreHistory,
   } = useAutoUpdateHistory({ tenantId });
 
+  // Only fires when the managed-only view is empty, to tell the user whether
+  // that's because everything is genuinely up to date or because updates exist
+  // for apps not deployed through IntuneGet (hidden behind the Unmanaged filter).
+  const { data: unmanagedCheckData } = useAvailableUpdates({
+    tenantId,
+    includeUnmanaged: true,
+    enabled: !showUnmanaged && !isLoadingUpdates && (updatesData?.updates.length ?? 0) === 0,
+  });
+  const hiddenUnmanagedCount = showUnmanaged
+    ? 0
+    : (unmanagedCheckData?.updates.filter((u) => !u.is_managed).length ?? 0);
+
   const { refreshUpdates, isRefreshing } = useRefreshAvailableUpdates({ tenantId });
   const { triggerUpdate } = useTriggerUpdate();
   const { updatePolicy } = useUpdatePolicy();
@@ -331,8 +343,15 @@ export default function UpdatesPage() {
     await refetchUpdates();
   }, [refreshUpdates, refetchUpdates]);
 
-  // Auto-refresh when initial load returns empty results
-  const hasTriggeredAutoRefresh = useRef(false);
+  // Auto-refresh once per tab session when initial load returns empty results.
+  // A component-local ref isn't enough here: an empty managed-only list is the
+  // steady state whenever every detected update is unmanaged, so a ref that
+  // resets on every mount would re-trigger a full Graph rescan on every visit
+  // to this page. Persist the "already tried" flag in sessionStorage instead.
+  const autoRefreshStorageKey = `updates:auto-refreshed:${tenantId || 'default'}`;
+  const hasTriggeredAutoRefresh = useRef(
+    typeof window !== 'undefined' && sessionStorage.getItem(autoRefreshStorageKey) === 'true'
+  );
   useEffect(() => {
     if (
       !isLoadingUpdates &&
@@ -342,9 +361,10 @@ export default function UpdatesPage() {
       updates.length === 0
     ) {
       hasTriggeredAutoRefresh.current = true;
+      sessionStorage.setItem(autoRefreshStorageKey, 'true');
       void handleRefresh();
     }
-  }, [isLoadingUpdates, isRefreshing, mspTenantSelectionRequired, updates.length, handleRefresh]);
+  }, [isLoadingUpdates, isRefreshing, mspTenantSelectionRequired, updates.length, handleRefresh, autoRefreshStorageKey]);
 
   // Check if any filters are active
   const hasActiveFilters = search.trim() !== '' || showCriticalOnly || updateTypeFilter !== null;
@@ -429,7 +449,7 @@ export default function UpdatesPage() {
                                 return (
                                   <span className="flex items-center gap-2 px-3 py-2 mb-2 bg-violet-500/10 border border-violet-500/20 rounded-lg text-sm text-violet-500">
                                     <Info className="w-4 h-4 flex-shrink-0" />
-                                    <T><Var>{newAppsCount}</Var> app{newAppsCount !== 1 ? 's' : ''} will have new app objects created in Intune (not previously deployed through IntuneGet)</T>
+                                    <T><Var>{newAppsCount}</Var> app{newAppsCount !== 1 ? 's' : ''} will have new app objects created in Intune (not previously deployed through HKS App Deployment)</T>
                                   </span>
                                 );
                               })()}
@@ -582,7 +602,7 @@ export default function UpdatesPage() {
               {pendingIsUnmanaged ? (
                 <>
                   <AlertTriangle className="w-5 h-5 text-status-warning" />
-                  <T>Update app not managed by IntuneGet?</T>
+                  <T>Update app not managed by HKS App Deployment?</T>
                 </>
               ) : (
                 <>
@@ -597,7 +617,7 @@ export default function UpdatesPage() {
                   <>
                     <p>
                       <T><Var><span className="font-medium text-text-primary">{pendingNewAppUpdate?.display_name}</span></Var> was matched
-                      to this Winget package automatically and is not managed by IntuneGet.</T>
+                      to this Winget package automatically and is not managed by HKS App Deployment.</T>
                     </p>
                     <ul className="space-y-1.5 text-sm">
                       <li className="flex items-start gap-2">
@@ -618,7 +638,7 @@ export default function UpdatesPage() {
                   <>
                 <p>
                   <T><Var><span className="font-medium text-text-primary">{pendingNewAppUpdate?.display_name}</span></Var> was not
-                  originally deployed through IntuneGet.</T>
+                  originally deployed through HKS App Deployment.</T>
                 </p>
                 <ul className="space-y-1.5 text-sm">
                   <li className="flex items-start gap-2">
@@ -825,7 +845,7 @@ export default function UpdatesPage() {
                   variant={showUnmanaged ? 'default' : 'ghost'}
                   size="sm"
                   onClick={() => setShowUnmanaged(!showUnmanaged)}
-                  title="Show updates for apps that were matched automatically and are not managed by IntuneGet. Hidden by default and never included in Update All."
+                  title="Show updates for apps that were matched automatically and are not managed by HKS App Deployment. Hidden by default and never included in Update All."
                   className={cn(
                     'h-8 text-xs',
                     showUnmanaged
@@ -987,6 +1007,23 @@ export default function UpdatesPage() {
               action={{
                 label: <T>Clear All Filters</T>,
                 onClick: clearAllFilters,
+                variant: 'secondary',
+              }}
+            />
+          ) : hiddenUnmanagedCount > 0 ? (
+            <AnimatedEmptyState
+              icon={ShieldOff}
+              title={<T>Your deployed apps are up to date</T>}
+              description={
+                <T>
+                  <Var>{hiddenUnmanagedCount}</Var> update{hiddenUnmanagedCount === 1 ? '' : 's'} available
+                  for apps not deployed through HKS App Deployment. Show them with the Unmanaged filter above.
+                </T>
+              }
+              color="cyan"
+              action={{
+                label: <T>Show Unmanaged Updates</T>,
+                onClick: () => setShowUnmanaged(true),
                 variant: 'secondary',
               }}
             />

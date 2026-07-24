@@ -92,7 +92,10 @@ export interface WingetManifest {
 // Supported architectures
 export type WingetArchitecture = 'x64' | 'x86' | 'arm64' | 'arm' | 'neutral';
 
-// Supported installer types
+// Supported installer types. 'chocolatey' is a synthetic type used only for
+// Chocolatey-sourced cart items: the actual install/uninstall commands come
+// from psadtConfig's override (see lib/chocolatey-app.ts), never from the
+// per-type generators below, so it only needs to exist for type-safety.
 export type WingetInstallerType =
   | 'msix'
   | 'msi'
@@ -104,7 +107,8 @@ export type WingetInstallerType =
   | 'wix'
   | 'burn'
   | 'pwa'
-  | 'portable';
+  | 'portable'
+  | 'chocolatey';
 
 // Installation scope
 export type WingetScope = 'user' | 'machine';
@@ -131,8 +135,10 @@ export interface LocaleVariant {
   version?: string;
 }
 
-// App source type
-export type AppSource = 'win32' | 'store';
+// App source type. 'chocolatey' is a catalog-origin marker only (NormalizedPackage);
+// the resulting cart item still uses appSource: 'win32' since it packages through
+// the same PSADT/.intunewin pipeline - see Win32CartItem.sourceType.
+export type AppSource = 'win32' | 'store' | 'chocolatey';
 
 // Normalized package data for internal use
 export interface NormalizedPackage {
@@ -150,7 +156,7 @@ export interface NormalizedPackage {
   category?: string;
   popularityRank?: number;
   installerType?: string;
-  // App source (win32 = winget LOB, store = Microsoft Store)
+  // App source (win32 = winget LOB, store = Microsoft Store, chocolatey = Chocolatey Community Repository)
   appSource?: AppSource;
   // Microsoft Store product ID (e.g. "9WZDNCRFJ3PZ")
   packageIdentifier?: string;

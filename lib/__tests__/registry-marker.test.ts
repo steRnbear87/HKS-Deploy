@@ -7,7 +7,7 @@ import {
 
 describe('normalizeMarkerPath', () => {
   it('should return the default for undefined input', () => {
-    expect(normalizeMarkerPath(undefined)).toBe('SOFTWARE\\IntuneGet\\Apps');
+    expect(normalizeMarkerPath(undefined)).toBe('SOFTWARE\\HKS\\Apps');
     expect(normalizeMarkerPath(undefined)).toBe(DEFAULT_REGISTRY_MARKER_PATH);
   });
 
@@ -80,7 +80,7 @@ describe('rewriteMarkerKeyPath', () => {
   it('should rewrite a default marker keyPath to a custom root', () => {
     expect(
       rewriteMarkerKeyPath(
-        'HKEY_LOCAL_MACHINE\\SOFTWARE\\IntuneGet\\Apps\\Google_Chrome',
+        'HKEY_LOCAL_MACHINE\\SOFTWARE\\HKS\\Apps\\Google_Chrome',
         'Google_Chrome',
         'SOFTWARE\\Contoso\\Apps'
       )
@@ -90,7 +90,7 @@ describe('rewriteMarkerKeyPath', () => {
   it('should preserve the HKCU hive', () => {
     expect(
       rewriteMarkerKeyPath(
-        'HKEY_CURRENT_USER\\SOFTWARE\\IntuneGet\\Apps\\Publisher_App',
+        'HKEY_CURRENT_USER\\SOFTWARE\\HKS\\Apps\\Publisher_App',
         'Publisher_App',
         'SOFTWARE\\Contoso\\Apps'
       )
@@ -133,7 +133,7 @@ describe('rewriteMarkerKeyPath', () => {
   it('should normalize the marker path before rewriting', () => {
     expect(
       rewriteMarkerKeyPath(
-        'HKEY_LOCAL_MACHINE\\SOFTWARE\\IntuneGet\\Apps\\Publisher_App',
+        'HKEY_LOCAL_MACHINE\\SOFTWARE\\HKS\\Apps\\Publisher_App',
         'Publisher_App',
         'HKLM\\SOFTWARE\\Contoso\\'
       )
@@ -142,7 +142,7 @@ describe('rewriteMarkerKeyPath', () => {
 
   it('should return null for a keyPath without a known hive', () => {
     expect(
-      rewriteMarkerKeyPath('SOFTWARE\\IntuneGet\\Apps\\Publisher_App', 'Publisher_App', 'X')
+      rewriteMarkerKeyPath('SOFTWARE\\HKS\\Apps\\Publisher_App', 'Publisher_App', 'X')
     ).toBeNull();
   });
 

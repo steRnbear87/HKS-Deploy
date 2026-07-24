@@ -303,7 +303,7 @@ export function AdminConsentBanner({ onConsentGranted }: AdminConsentBannerProps
           </h3>
           <p className="text-sm text-text-secondary mb-4">
             To deploy apps to your Intune tenant, a <strong className="text-amber-600">Global Administrator</strong> needs
-            to grant permission for IntuneGet to access your organization.
+            to grant permission for HKS App Deployment to access your organization.
           </p>
 
           {!showShareOption ? (
@@ -383,7 +383,7 @@ export function AdminConsentBanner({ onConsentGranted }: AdminConsentBannerProps
           )}
 
           <p className="text-xs text-text-muted mt-4">
-            This is a one-time setup. After consent is granted, any user with Intune permissions can use IntuneGet.
+            This is a one-time setup. After consent is granted, any user with Intune permissions can use HKS App Deployment.
           </p>
         </div>
       </div>

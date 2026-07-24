@@ -36,6 +36,11 @@ interface PermissionStatus {
   deviceManagementManagedDevices: boolean | null;
   deviceManagementServiceConfig: boolean | null;
   deviceManagementConfiguration: boolean | null;
+  // Distinct from deviceManagementConfiguration (.Read.All, used by filters):
+  // Windows Update policy management (rings/feature/quality/driver profiles)
+  // needs the write-capable role. Checked via role claim only, not a live
+  // Graph call, since testing "can write" would require an actual mutation.
+  deviceManagementConfigurationWrite: boolean | null;
 }
 
 interface ConsentVerificationResult {
@@ -107,6 +112,7 @@ async function verifyConsentWithGraph(tenantId: string, justConsented = false): 
         deviceManagementManagedDevices: tokenRoles.includes('DeviceManagementManagedDevices.Read.All'),
         deviceManagementServiceConfig: tokenRoles.includes('DeviceManagementServiceConfig.ReadWrite.All'),
         deviceManagementConfiguration: tokenRoles.includes('DeviceManagementConfiguration.Read.All'),
+        deviceManagementConfigurationWrite: tokenRoles.includes('DeviceManagementConfiguration.ReadWrite.All'),
       };
 
       // If consent was just granted, Microsoft can take minutes to propagate
@@ -141,6 +147,7 @@ async function verifyConsentWithGraph(tenantId: string, justConsented = false): 
     deviceManagementManagedDevices: tokenRoles.includes('DeviceManagementManagedDevices.Read.All') || null,
     deviceManagementServiceConfig: tokenRoles.includes('DeviceManagementServiceConfig.ReadWrite.All') || null,
     deviceManagementConfiguration: tokenRoles.includes('DeviceManagementConfiguration.Read.All') || null,
+    deviceManagementConfigurationWrite: tokenRoles.includes('DeviceManagementConfiguration.ReadWrite.All') || null,
   };
 
   // Test DeviceManagementApps.ReadWrite.All permission

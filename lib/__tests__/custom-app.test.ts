@@ -115,7 +115,7 @@ describe('buildCustomAppCartItem', () => {
 
     expect(rule.type).toBe('registry');
     expect(rule.keyPath).toBe(
-      'HKEY_LOCAL_MACHINE\\SOFTWARE\\IntuneGet\\Apps\\Custom_OBrienSoftware_MyApp2'
+      'HKEY_LOCAL_MACHINE\\SOFTWARE\\HKS\\Apps\\Custom_OBrienSoftware_MyApp2'
     );
     expect(rule.detectionValue).toBe('1.2.3');
   });

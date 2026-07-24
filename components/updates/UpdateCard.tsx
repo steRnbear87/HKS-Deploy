@@ -15,6 +15,7 @@ import {
   Zap,
   Plus,
   ShieldOff,
+  Laptop,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { AppIcon } from '@/components/AppIcon';
@@ -163,7 +164,7 @@ export function UpdateCard({
               {!update.is_managed && (
                 <span
                   className="flex items-center gap-1 px-1.5 py-0.5 text-[11px] font-semibold text-accent-violet bg-accent-violet/10 border border-accent-violet/20 rounded-md flex-shrink-0 uppercase tracking-wide"
-                  title="Matched automatically; not managed by IntuneGet. Update with care -- excluded from Update All."
+                  title="Matched automatically; not managed by HKS App Deployment. Update with care -- excluded from Update All."
                 >
                   <ShieldOff className="w-2.5 h-2.5" />
                   <T>Unmanaged</T>
@@ -223,7 +224,7 @@ export function UpdateCard({
           {!update.has_prior_deployment && update.is_managed && (
             <span className="flex items-center gap-1 text-[11px] font-medium text-violet-500">
               <Plus className="w-3 h-3" />
-              <T>New to IntuneGet</T>
+              <T>New to HKS App Deployment</T>
             </span>
           )}
           {isAutoUpdateEnabled && (
@@ -248,6 +249,27 @@ export function UpdateCard({
             <span className="flex items-center gap-1 text-[11px] text-text-muted">
               <Clock className="w-3 h-3" />
               <T>Detected <Var>{detectedDaysAgo === 1 ? '1 day' : `${detectedDaysAgo} days`}</Var> ago</T>
+            </span>
+          )}
+          {update.rollout && (
+            <span
+              className={cn(
+                'flex items-center gap-1 text-[11px] font-medium',
+                update.rollout.behind > 0 ? 'text-status-warning' : 'text-text-muted'
+              )}
+              title={
+                update.rollout.partial
+                  ? 'Partial scan - some devices may not be counted yet'
+                  : `Rollout status as of ${new Date(update.rollout.scannedAt).toLocaleDateString()}`
+              }
+            >
+              <Laptop className="w-3 h-3" />
+              {update.rollout.onExpected}/{update.rollout.totalScanned} <T>on</T> {update.rollout.expectedVersion}
+              {update.rollout.behind > 0 && (
+                <>
+                  {' '}&middot; {update.rollout.behind} <T>lagging</T>
+                </>
+              )}
             </span>
           )}
         </div>

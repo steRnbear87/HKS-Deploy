@@ -30,7 +30,7 @@ describe('findDuplicateIntuneApp', () => {
           {
             id: 'existing-app',
             displayName: 'DRAW.IO',
-            description: 'Deployed via IntuneGet from Winget: jgraph.draw',
+            description: 'Deployed via HKS App Deployment from Winget: jgraph.draw',
           },
         ],
       },
@@ -69,7 +69,7 @@ describe('findDuplicateIntuneApp', () => {
           {
             id: 'incomplete-app',
             displayName: 'draw.io',
-            description: 'Source: IntuneGet.com',
+            description: 'Source: HKS App Deployment',
           },
         ],
         '@odata.nextLink':
@@ -85,7 +85,7 @@ describe('findDuplicateIntuneApp', () => {
           {
             id: 'committed-app',
             displayName: 'draw.io',
-            description: 'Source: IntuneGet.com',
+            description: 'Source: HKS App Deployment',
           },
         ],
       },
@@ -110,7 +110,7 @@ describe('findDuplicateIntuneApp', () => {
         {
           id: 'other-app',
           displayName: 'draw.io',
-          description: 'Source: IntuneGet.com - Winget: Different.Package',
+          description: 'Source: HKS App Deployment - Winget: Different.Package',
         },
       ],
     });

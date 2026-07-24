@@ -111,6 +111,40 @@ export interface InventoryState {
   error: string | null;
 }
 
+/**
+ * Aggregated device install-state counts for an app, pulled live from
+ * Graph's deviceStatuses collection (not IntuneGet's own job records).
+ */
+export interface InstallStatusCounts {
+  installed: number;
+  failed: number;
+  pending: number;
+  notApplicable: number;
+  unknown: number;
+  total: number;
+}
+
+/**
+ * A single failed device install, surfaced for troubleshooting.
+ */
+export interface InstallStatusFailure {
+  deviceName: string;
+  errorCode: number | null;
+  lastSyncDateTime: string | null;
+}
+
+/**
+ * Response from the per-app install-status API (live Graph deviceStatuses).
+ */
+export interface AppInstallStatusResponse {
+  counts: InstallStatusCounts;
+  failures: InstallStatusFailure[];
+  /** True when the failures list was capped (more failures exist than shown) */
+  truncated: boolean;
+  /** True when the scan ran out of its time budget and counts are incomplete */
+  partial: boolean;
+}
+
 export interface AppUpdateInfo {
   intuneApp: IntuneWin32App;
   currentVersion: string;

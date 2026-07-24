@@ -1,6 +1,6 @@
 'use client';
 
-import { useRouter } from 'next/navigation';
+import { useRouter, usePathname, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import { motion, useReducedMotion } from 'framer-motion';
 import {
@@ -18,10 +18,9 @@ import { useProfileStore } from '@/stores/profile-store';
 import { useMicrosoftAuth } from '@/hooks/useMicrosoftAuth';
 import { useOnboardingStatus } from '@/hooks/useOnboardingStatus';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
-import { TenantSwitcher } from '@/components/msp';
 import { UploadCart } from '@/components/UploadCart';
 import { NotificationBell } from '@/components/notifications';
-import { Sidebar, DeploymentStatusIndicator } from '@/components/dashboard';
+import { Sidebar, DeploymentStatusIndicator, ThemeToggle } from '@/components/dashboard';
 import { CommandPalette } from '@/components/dashboard/CommandPalette';
 import { springPresets } from '@/lib/animations/variants';
 
@@ -38,6 +37,8 @@ export default function DashboardLayout({
     retryVerification,
   } = useOnboardingStatus();
   const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const isCollapsed = useSidebarStore((state) => state.isCollapsed);
   const fetchProfileImage = useProfileStore((state) => state.fetchProfileImage);
   const prefersReducedMotion = useReducedMotion();
@@ -64,9 +65,15 @@ export default function DashboardLayout({
 
   useEffect(() => {
     if (!isLoading && !isAuthenticated && !isSigningOut) {
-      router.push('/auth/signin?callbackUrl=/dashboard');
+      // Preserve the page (and its query string) the user was actually on -
+      // otherwise a refresh on any /dashboard/* page bounces back to
+      // /dashboard once silent auth resolves, since this was previously
+      // hardcoded to /dashboard regardless of where the user was.
+      const query = searchParams.toString();
+      const currentPath = query ? `${pathname}?${query}` : pathname;
+      router.push(`/auth/signin?callbackUrl=${encodeURIComponent(currentPath)}`);
     }
-  }, [isLoading, isAuthenticated, isSigningOut, router]);
+  }, [isLoading, isAuthenticated, isSigningOut, router, pathname, searchParams]);
 
   useEffect(() => {
     if (isLoading || !isAuthenticated || isCheckingOnboarding) return;
@@ -168,8 +175,8 @@ export default function DashboardLayout({
             <div className="flex-1 lg:hidden" />
 
             <div className="flex items-center gap-3">
-              <TenantSwitcher />
               <DeploymentStatusIndicator />
+              <ThemeToggle />
               <NotificationBell />
               <Button
                 variant="ghost"

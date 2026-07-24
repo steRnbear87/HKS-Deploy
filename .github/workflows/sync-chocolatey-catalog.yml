@@ -1,0 +1,323 @@
+name: Sync Chocolatey Catalog
+
+on:
+  schedule:
+    # Run weekly on Sundays at 02:00 UTC, offset from the winget catalog build
+    - cron: '0 2 * * 0'
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: 'Maximum number of packages to import (0 = all)'
+        required: false
+        default: '0'
+
+# Prevent concurrent runs that could cause database conflicts
+concurrency:
+  group: curated-apps-pipeline
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '26.5.0'
+  CHOCO_FEED_URL: 'https://community.chocolatey.org/api/v2/Packages()'
+  # OData server pages silently (no rel="next" link) at ~40 entries/request -
+  # confirmed empirically against the live feed. $skip is the only reliable way
+  # to walk the full catalog.
+  CHOCO_PAGE_SIZE: '40'
+
+permissions:
+  contents: read
+
+jobs:
+  sync-chocolatey-catalog:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Fetch and import Chocolatey packages
+        id: import
+        env:
+          SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          IMPORT_LIMIT: ${{ github.event.inputs.limit || '0' }}
+        run: |
+          node << 'EOF'
+          const fs = require('fs');
+          const { createClient } = require('@supabase/supabase-js');
+          const { XMLParser } = require('fast-xml-parser');
+
+          const supabaseUrl = process.env.SUPABASE_URL;
+          const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
+          if (!supabaseUrl || !supabaseKey) {
+            throw new Error('Supabase credentials not configured');
+          }
+          const supabase = createClient(supabaseUrl, supabaseKey);
+
+          const FEED_URL = process.env.CHOCO_FEED_URL;
+          const PAGE_SIZE = parseInt(process.env.CHOCO_PAGE_SIZE, 10);
+          const importLimit = parseInt(process.env.IMPORT_LIMIT || '0', 10);
+
+          const parser = new XMLParser({
+            ignoreAttributes: false,
+            attributeNamePrefix: '@_',
+            removeNSPrefix: true, // collapse d:/m: namespace prefixes to plain tag names
+          });
+
+          async function fetchPage(skip) {
+            const url = `${FEED_URL}?$filter=IsLatestVersion eq true&$orderby=Id&$top=${PAGE_SIZE}&$skip=${skip}`;
+            for (let attempt = 1; attempt <= 4; attempt++) {
+              try {
+                const res = await fetch(url, {
+                  headers: { Accept: 'application/atom+xml, application/xml' },
+                  signal: AbortSignal.timeout(30000),
+                });
+                if (!res.ok) {
+                  throw new Error(`HTTP ${res.status}`);
+                }
+                const xml = await res.text();
+                const doc = parser.parse(xml);
+                const entries = doc?.feed?.entry;
+                if (!entries) return [];
+                return Array.isArray(entries) ? entries : [entry_wrap(entries)];
+              } catch (err) {
+                if (attempt === 4) throw err;
+                console.warn(`Page skip=${skip} attempt ${attempt} failed: ${err.message}. Retrying...`);
+                await new Promise((r) => setTimeout(r, 2000 * attempt));
+              }
+            }
+          }
+          function entry_wrap(e) { return e; }
+
+          function textOf(value) {
+            // fast-xml-parser returns plain strings for simple elements and
+            // objects (with '#text') for elements that also carry attributes
+            // (e.g. <d:Created m:type="Edm.DateTime">...).
+            if (value == null) return '';
+            if (typeof value === 'string') return value;
+            if (typeof value === 'object' && '#text' in value) return String(value['#text']);
+            return String(value);
+          }
+
+          // Chocolatey package descriptions are free-form maintainer-written text
+          // that routinely embeds markdown (screenshot images, headings, links,
+          // bold/italic) - unlike winget's curated plain-text descriptions, this
+          // app has nowhere that renders markdown, so left as-is it shows up as
+          // literal "![Screenshot](https://...)" noise on package cards. Strip
+          // the markdown syntax down to plain text rather than teaching every
+          // description-rendering call site about markdown.
+          function cleanDescription(raw) {
+            if (!raw) return null;
+            const cleaned = raw
+              .replace(/!\[[^\]]*\]\([^)]*\)/g, '') // drop images entirely - alt text is rarely useful standalone
+              .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1') // markdown links -> just the link text
+              .replace(/^#{1,6}\s*/gm, '') // heading markers
+              .replace(/\*\*([^*]+)\*\*/g, '$1') // bold
+              .replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '$1') // italic
+              .split('\n').map((l) => l.trim()).join('\n')
+              .replace(/\n{3,}/g, '\n\n')
+              .trim();
+            return cleaned || null;
+          }
+
+          function entryToRow(entry) {
+            const props = entry.properties || {};
+            const packageId = textOf(entry.title).trim();
+            if (!packageId) return null;
+
+            const tagsRaw = textOf(props.Tags).trim();
+            const tags = tagsRaw ? tagsRaw.split(/\s+/).filter(Boolean) : [];
+
+            const iconUrl = textOf(props.IconUrl).trim() || null;
+            const description = cleanDescription(textOf(props.Description).trim() || null);
+
+            return {
+              winget_id: packageId,
+              name: textOf(props.Title).trim() || packageId,
+              publisher: textOf(entry.author?.name).trim() || 'Unknown',
+              latest_version: textOf(props.Version).trim() || null,
+              description,
+              homepage: textOf(props.ProjectUrl).trim() || null,
+              tags,
+              icon_path: iconUrl,
+              has_icon: Boolean(iconUrl),
+              icon_source: iconUrl ? 'chocolatey-direct-link' : null,
+              app_source: 'chocolatey',
+              is_verified: true, // Source is authoritative (Chocolatey Community Repository)
+              is_locale_variant: false,
+              updated_at: new Date().toISOString(),
+            };
+          }
+
+          async function importChocolatey() {
+            const { error: startStatusError } = await supabase.from('curated_sync_status').upsert({
+              id: 'sync-chocolatey-catalog',
+              last_run_started_at: new Date().toISOString(),
+              last_run_status: 'running',
+              updated_at: new Date().toISOString(),
+            });
+            if (startStatusError) {
+              throw new Error(`Failed to mark Chocolatey sync as running: ${startStatusError.message}`);
+            }
+
+            const allRows = [];
+            let skip = 0;
+            let page;
+            while ((page = await fetchPage(skip)).length > 0) {
+              for (const entry of page) {
+                const row = entryToRow(entry);
+                if (row) allRows.push(row);
+              }
+              console.log(`Fetched page at skip=${skip}: ${page.length} entries (total so far: ${allRows.length})`);
+              skip += PAGE_SIZE;
+              if (importLimit > 0 && allRows.length >= importLimit) break;
+              // Be polite to the community feed between pages.
+              await new Promise((r) => setTimeout(r, 300));
+            }
+
+            const rows = importLimit > 0 ? allRows.slice(0, importLimit) : allRows;
+            console.log(`Prepared ${rows.length} Chocolatey packages for upsert`);
+
+            const batchSize = 500;
+            let totalUpserted = 0;
+            let errors = 0;
+            for (let i = 0; i < rows.length; i += batchSize) {
+              const batch = rows.slice(i, i + batchSize);
+              const { error } = await supabase
+                .from('curated_apps')
+                .upsert(batch, { onConflict: 'winget_id', ignoreDuplicates: false });
+              if (error) {
+                console.error(`Batch ${Math.floor(i / batchSize) + 1} failed:`, error.message);
+                errors++;
+              } else {
+                totalUpserted += batch.length;
+              }
+            }
+
+            // Remove Chocolatey rows that no longer appear in the feed (package
+            // delisted/renamed). Never touches winget/store rows (app_source filter).
+            const currentIds = new Set(rows.map((r) => r.winget_id));
+            let purged = 0;
+            {
+              const pageSize = 1000;
+              const staleIds = [];
+              for (let from = 0; ; from += pageSize) {
+                const { data, error } = await supabase
+                  .from('curated_apps')
+                  .select('winget_id')
+                  .eq('app_source', 'chocolatey')
+                  .range(from, from + pageSize - 1);
+                if (error) {
+                  console.error('Stale-row scan failed:', error.message);
+                  errors++;
+                  break;
+                }
+                if (!data || data.length === 0) break;
+                for (const row of data) {
+                  if (!currentIds.has(row.winget_id)) staleIds.push(row.winget_id);
+                }
+                if (data.length < pageSize) break;
+              }
+              const chunkSize = 200;
+              for (let i = 0; i < staleIds.length; i += chunkSize) {
+                const chunk = staleIds.slice(i, i + chunkSize);
+                const { error, count } = await supabase
+                  .from('curated_apps')
+                  .delete({ count: 'exact' })
+                  .eq('app_source', 'chocolatey')
+                  .in('winget_id', chunk);
+                if (error) {
+                  console.error('Stale-row purge chunk failed:', error.message);
+                  errors++;
+                } else {
+                  purged += count || 0;
+                }
+              }
+            }
+
+            const { error: completionStatusError } = await supabase.from('curated_sync_status').upsert({
+              id: 'sync-chocolatey-catalog',
+              last_run_completed_at: new Date().toISOString(),
+              last_run_status: errors > 0 ? 'failed' : 'success',
+              items_processed: totalUpserted,
+              error_message: errors > 0 ? `${errors} batch/purge operations failed` : null,
+              metadata: {
+                source: 'chocolatey-community-repository',
+                total_packages: rows.length,
+                upserted: totalUpserted,
+                purged_stale: purged,
+                batch_errors: errors,
+              },
+              updated_at: new Date().toISOString(),
+            });
+            if (completionStatusError) {
+              throw new Error(`Failed to record Chocolatey sync status: ${completionStatusError.message}`);
+            }
+
+            console.log(`\nChocolatey sync complete:`);
+            console.log(`  - Total packages fetched: ${rows.length}`);
+            console.log(`  - Successfully upserted: ${totalUpserted}`);
+            console.log(`  - Purged stale rows: ${purged}`);
+            console.log(`  - Batch errors: ${errors}`);
+
+            fs.writeFileSync('./import-stats.json', JSON.stringify({
+              total: rows.length,
+              upserted: totalUpserted,
+              purged_stale: purged,
+              errors,
+            }));
+
+            if (errors > 0) {
+              throw new Error(`Chocolatey sync completed with ${errors} failed operation(s)`);
+            }
+          }
+
+          importChocolatey().then(() => {
+            process.exit(0);
+          }).catch(async (err) => {
+            console.error('Chocolatey sync failed:', err.message);
+            await supabase.from('curated_sync_status').upsert({
+              id: 'sync-chocolatey-catalog',
+              last_run_status: 'failed',
+              error_message: err.message,
+              updated_at: new Date().toISOString(),
+            }).catch((e) => console.error('Could not persist failed sync status:', e.message));
+            process.exit(1);
+          });
+          EOF
+
+      - name: Create summary
+        if: always()
+        run: |
+          if [ ! -f import-stats.json ]; then
+            echo "## Chocolatey Catalog Sync Failed" >> "$GITHUB_STEP_SUMMARY"
+            echo "No import statistics were produced." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          else
+            TOTAL=$(jq -r '.total' import-stats.json)
+            UPSERTED=$(jq -r '.upserted' import-stats.json)
+            PURGED=$(jq -r '.purged_stale // 0' import-stats.json)
+            ERRORS=$(jq -r '.errors' import-stats.json)
+
+            echo "## Chocolatey Catalog Sync Summary" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Source: Chocolatey Community Repository (OData v2)" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "- **Total packages fetched:** $TOTAL" >> $GITHUB_STEP_SUMMARY
+            echo "- **Successfully imported:** $UPSERTED" >> $GITHUB_STEP_SUMMARY
+            echo "- **Purged stale rows:** $PURGED" >> $GITHUB_STEP_SUMMARY
+            echo "- **Batch errors:** $ERRORS" >> $GITHUB_STEP_SUMMARY
+            echo "- **Generated at:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> $GITHUB_STEP_SUMMARY
+          fi

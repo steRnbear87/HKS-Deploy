@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 
 export const metadata: Metadata = {
-  title: 'Setup | IntuneGet',
+  title: 'Setup | HKS App Deployment',
   description: 'Complete your organization setup to start deploying apps to Intune',
 };
 

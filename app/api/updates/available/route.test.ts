@@ -1,8 +1,19 @@
 import { NextRequest } from 'next/server';
 
-const { parseAccessTokenMock, createServerClientMock } = vi.hoisted(() => ({
+const {
+  parseAccessTokenMock,
+  createServerClientMock,
+  resolveTargetTenantIdMock,
+  getUpdateCheckResultsByUserIdMock,
+  getUploadHistoryByUserIdMock,
+  getDeploymentDriftByUserIdMock,
+} = vi.hoisted(() => ({
   parseAccessTokenMock: vi.fn(),
   createServerClientMock: vi.fn(),
+  resolveTargetTenantIdMock: vi.fn(),
+  getUpdateCheckResultsByUserIdMock: vi.fn(),
+  getUploadHistoryByUserIdMock: vi.fn(),
+  getDeploymentDriftByUserIdMock: vi.fn(),
 }));
 
 vi.mock('@/lib/auth-utils', () => ({
@@ -12,6 +23,24 @@ vi.mock('@/lib/auth-utils', () => ({
 vi.mock('@/lib/supabase', () => ({
   createServerClient: createServerClientMock,
   isSupabaseConfigured: () => true,
+}));
+
+vi.mock('@/lib/msp/tenant-resolution', () => ({
+  resolveTargetTenantId: resolveTargetTenantIdMock,
+}));
+
+// The route reads update_check_results/upload_history via the DB adapter
+// (works in both Supabase and self-hosted SQLite mode) rather than a raw
+// Supabase query - mock it directly instead of routing through the real
+// getDatabase(), which pulls in a dynamic require() that doesn't resolve
+// under Vitest's transform. app_update_policies stays Supabase-only (no
+// SQLite equivalent), so that part still goes through createServerClientMock.
+vi.mock('@/lib/db', () => ({
+  getDatabase: () => ({
+    updateCheckResults: { getByUserId: getUpdateCheckResultsByUserIdMock },
+    uploadHistory: { getByUserId: getUploadHistoryByUserIdMock },
+    deploymentDrift: { getByUserId: getDeploymentDriftByUserIdMock },
+  }),
 }));
 
 import { GET } from '@/app/api/updates/available/route';
@@ -51,6 +80,15 @@ function createAwaitableQuery(
 describe('GET /api/updates/available', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    getUpdateCheckResultsByUserIdMock.mockResolvedValue([]);
+    getUploadHistoryByUserIdMock.mockResolvedValue([]);
+    getDeploymentDriftByUserIdMock.mockResolvedValue([]);
+    resolveTargetTenantIdMock.mockImplementation(
+      async ({ requestedTenantId, tokenTenantId }: { requestedTenantId: string | null; tokenTenantId: string }) => ({
+        tenantId: requestedTenantId || tokenTenantId,
+        errorResponse: null,
+      })
+    );
   });
 
   it('applies tenant filter to updates and policy lookup', async () => {
@@ -61,31 +99,25 @@ describe('GET /api/updates/available', () => {
       userName: 'User',
     });
 
-    const updateOps: Array<{ method: string; args: unknown[] }> = [];
-    const policyOps: Array<{ method: string; args: unknown[] }> = [];
-
-    const updatesQuery = createAwaitableQuery(
+    getUpdateCheckResultsByUserIdMock.mockResolvedValue([
       {
-        data: [
-          {
-            id: 'upd-1',
-            user_id: 'user-1',
-            tenant_id: 'tenant-a',
-            winget_id: 'Microsoft.Edge',
-            intune_app_id: 'app-1',
-            display_name: 'Edge',
-            current_version: '1.0.0',
-            latest_version: '1.1.0',
-            is_critical: true,
-            detected_at: '2026-02-01T00:00:00Z',
-            notified_at: null,
-            dismissed_at: null,
-          },
-        ],
-        error: null,
+        id: 'upd-1',
+        user_id: 'user-1',
+        tenant_id: 'tenant-a',
+        winget_id: 'Microsoft.Edge',
+        intune_app_id: 'app-1',
+        display_name: 'Edge',
+        current_version: '1.0.0',
+        latest_version: '1.1.0',
+        is_critical: true,
+        is_managed: true,
+        detected_at: '2026-02-01T00:00:00Z',
+        notified_at: null,
+        dismissed_at: null,
       },
-      updateOps
-    );
+    ]);
+
+    const policyOps: Array<{ method: string; args: unknown[] }> = [];
 
     const policiesQuery = createAwaitableQuery(
       {
@@ -106,16 +138,9 @@ describe('GET /api/updates/available', () => {
       policyOps
     );
 
-    const uploadHistoryQuery = createAwaitableQuery(
-      { data: [], error: null },
-      []
-    );
-
     createServerClientMock.mockReturnValue({
       from: (table: string) => {
-        if (table === 'update_check_results') return updatesQuery;
         if (table === 'app_update_policies') return policiesQuery;
-        if (table === 'upload_history') return uploadHistoryQuery;
         throw new Error(`Unexpected table: ${table}`);
       },
     });
@@ -133,11 +158,10 @@ describe('GET /api/updates/available', () => {
     expect(body.criticalCount).toBe(1);
     expect(body.updates[0].policy?.id).toBe('pol-1');
 
-    expect(
-      updateOps.some(
-        (op) => op.method === 'eq' && op.args[0] === 'tenant_id' && op.args[1] === 'tenant-a'
-      )
-    ).toBe(true);
+    expect(getUpdateCheckResultsByUserIdMock).toHaveBeenCalledWith(
+      'user-1',
+      expect.objectContaining({ tenantId: 'tenant-a' })
+    );
     expect(
       policyOps.some(
         (op) => op.method === 'eq' && op.args[0] === 'tenant_id' && op.args[1] === 'tenant-a'
@@ -153,7 +177,7 @@ describe('GET /api/updates/available', () => {
       userName: 'User',
     });
 
-    const rows = [
+    getUpdateCheckResultsByUserIdMock.mockResolvedValue([
       {
         id: 'upd-managed',
         user_id: 'user-1',
@@ -184,16 +208,11 @@ describe('GET /api/updates/available', () => {
         notified_at: null,
         dismissed_at: null,
       },
-    ];
+    ]);
 
-    // Fresh awaitable queries per client call so two GETs don't share state.
     createServerClientMock.mockImplementation(() => ({
       from: (table: string) => {
-        if (table === 'update_check_results')
-          return createAwaitableQuery({ data: rows, error: null }, []);
         if (table === 'app_update_policies')
-          return createAwaitableQuery({ data: [], error: null }, []);
-        if (table === 'upload_history')
           return createAwaitableQuery({ data: [], error: null }, []);
         throw new Error(`Unexpected table: ${table}`);
       },

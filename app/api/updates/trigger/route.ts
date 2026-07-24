@@ -334,7 +334,7 @@ export async function POST(request: NextRequest) {
               displayName: deploymentConfig.displayName || installerInfo.displayName,
               description: buildIntuneAppDescription({
                 description: deploymentConfig.description,
-                fallback: `Deployed via IntuneGet from Winget: ${req.winget_id}`,
+                fallback: `Deployed via HKS App Deployment from Winget: ${req.winget_id}`,
               }),
               publisher: deploymentConfig.publisher || 'Unknown Publisher',
               version: installerInfo.latestVersion,

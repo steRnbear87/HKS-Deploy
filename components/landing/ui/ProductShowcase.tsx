@@ -11,12 +11,12 @@ interface ProductShowcaseProps {
 }
 
 const apps = [
-  { name: "Google Chrome", icon: "/icons/Google.Chrome/icon-64.png", status: "deployed", alt: "Google Chrome deployment to Microsoft Intune via IntuneGet" },
-  { name: "Microsoft Teams", icon: "/icons/Microsoft.Teams/icon-64.png", status: "deployed", alt: "Microsoft Teams deployment to Intune using IntuneGet" },
-  { name: "VS Code", icon: "/icons/Microsoft.VisualStudioCode/icon-64.png", status: "deployed", alt: "Visual Studio Code deployment to Intune with IntuneGet" },
+  { name: "Google Chrome", icon: "/icons/Google.Chrome/icon-64.png", status: "deployed", alt: "Google Chrome deployment to Microsoft Intune via HKS App Deployment" },
+  { name: "Microsoft Teams", icon: "/icons/Microsoft.Teams/icon-64.png", status: "deployed", alt: "Microsoft Teams deployment to Intune using HKS App Deployment" },
+  { name: "VS Code", icon: "/icons/Microsoft.VisualStudioCode/icon-64.png", status: "deployed", alt: "Visual Studio Code deployment to Intune with HKS App Deployment" },
   { name: "Slack", icon: "/icons/SlackTechnologies.Slack/icon-64.png", status: "pending", alt: "Slack app being packaged for Intune deployment" },
-  { name: "Zoom", icon: "/icons/Zoom.Zoom/icon-64.png", status: "deployed", alt: "Zoom deployment to Microsoft Intune via IntuneGet" },
-  { name: "7-Zip", icon: "/icons/7zip.7zip/icon-64.png", status: "ready", alt: "7-Zip ready for Intune deployment with IntuneGet" },
+  { name: "Zoom", icon: "/icons/Zoom.Zoom/icon-64.png", status: "deployed", alt: "Zoom deployment to Microsoft Intune via HKS App Deployment" },
+  { name: "7-Zip", icon: "/icons/7zip.7zip/icon-64.png", status: "ready", alt: "7-Zip ready for Intune deployment with HKS App Deployment" },
   { name: "Firefox", icon: "/icons/Mozilla.Firefox/icon-64.png", status: "ready", alt: "Mozilla Firefox ready for Intune deployment" },
   { name: "VLC Player", icon: "/icons/VideoLAN.VLC/icon-64.png", status: "ready", alt: "VLC Player ready for Intune deployment" },
 ];

@@ -4,7 +4,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { createServerClient } from '@/lib/supabase';
+import { createServerClient, isSupabaseConfigured } from '@/lib/supabase';
 import { parseAccessToken } from '@/lib/auth-utils';
 
 /**
@@ -19,6 +19,12 @@ export async function GET(request: NextRequest) {
         { error: 'Authentication required' },
         { status: 401 }
       );
+    }
+
+    // In-app notifications are backed by a Supabase-only table with no
+    // SQLite equivalent; self-hosted installs just show no unread badge.
+    if (!isSupabaseConfigured()) {
+      return NextResponse.json({ unread_count: 0 });
     }
 
     const supabase = createServerClient();
@@ -39,7 +45,8 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({
       unread_count: count || 0,
     });
-  } catch {
+  } catch (error) {
+    console.error('[GET /api/notifications/unread-count] Unhandled error:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }

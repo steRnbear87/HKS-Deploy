@@ -1,29 +1,45 @@
 /**
  * Check Updates Cron Job
- * Runs daily to detect available updates for deployed Intune apps
- * Stores results in update_check_results for notification processing
- * Triggers auto-updates for apps with auto_update policy
+ * Runs daily to detect available updates across each tenant's full Intune app
+ * inventory (not just apps IntuneGet itself deployed) - the same live scan
+ * app/api/intune/apps/updates/route.ts runs on-demand, automated here.
+ * Stores results in update_check_results for notification processing.
+ * Triggers auto-updates for apps with auto_update policy (Supabase mode only
+ * - see the SQLite branch below for why).
  */
 
 import { NextResponse } from 'next/server';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import { parseVersion, compareVersions } from '@/lib/version-compare';
+import { parseVersion } from '@/lib/version-compare';
 import {
   AutoUpdateTrigger,
   getLatestInstallerInfo,
 } from '@/lib/auto-update/trigger';
 import { AppUpdatePolicy, shouldSkipUpdate } from '@/types/update-policies';
-import { getCatalogSource } from '@/lib/catalog';
+import { getServicePrincipalToken } from '@/lib/intune/graph-client';
+import { getDatabase } from '@/lib/db';
+import {
+  fetchTenantAppInventory,
+  computeUserAppUpdates,
+  filterUpdatesByPolicy,
+  type TenantAppInventory,
+} from '@/lib/intune/live-app-updates';
+import {
+  fetchTenantDetectedAppsIndex,
+  computeDeploymentDriftForUpdates,
+  type TenantDetectedAppsIndex,
+  type DriftResult,
+} from '@/lib/intune/deployment-drift';
+import type { AppUpdateInfo } from '@/types/inventory';
 
 const BATCH_SIZE = 50;
 
-interface UploadHistoryRecord {
-  id: string;
+// Leaves headroom under maxDuration (300s) so a tenant mid-scan when the
+// budget runs out is skipped cleanly rather than the whole run timing out.
+const SCAN_BUDGET_MS = 4.5 * 60 * 1000;
+
+interface UserTenantRow {
   user_id: string;
-  winget_id: string;
-  version: string;
-  display_name: string;
-  intune_app_id: string;
   intune_tenant_id: string | null;
 }
 
@@ -37,7 +53,10 @@ interface UpdateCheckInsert {
   latest_version: string;
   is_critical: boolean;
   is_managed: boolean;
+  large_icon_type: string | null;
+  large_icon_value: string | null;
   notified_at: string | null;
+  dismissed_at: string | null;
   detected_at: string;
   updated_at: string;
 }
@@ -57,8 +76,77 @@ interface ExistingUpdateCheckRow {
   intune_app_id: string;
 }
 
+interface DriftInsert {
+  user_id: string;
+  tenant_id: string;
+  winget_id: string;
+  intune_app_id: string;
+  display_name: string;
+  expected_version: string;
+  total_devices_scanned: number;
+  on_expected_count: number;
+  behind_count: number;
+  ahead_count: number;
+  partial: boolean;
+  scanned_at: string;
+}
+
+function toDriftInsert(userId: string, tenantId: string, result: DriftResult, scannedAt: string): DriftInsert {
+  return {
+    user_id: userId,
+    tenant_id: tenantId,
+    winget_id: result.wingetId,
+    intune_app_id: result.intuneAppId,
+    display_name: result.displayName,
+    expected_version: result.expectedVersion,
+    total_devices_scanned: result.totalDevicesScanned,
+    on_expected_count: result.onExpectedCount,
+    behind_count: result.behindCount,
+    ahead_count: result.aheadCount,
+    partial: result.partial,
+    scanned_at: scannedAt,
+  };
+}
+
 /**
- * Process auto-updates for detected updates
+ * Best-effort drift computation for one tenant's managed updates. Never
+ * throws - a Graph hiccup here must not fail or block the underlying
+ * update-detection write, which is the primary job of this cron.
+ */
+async function computeDriftSafely(
+  userId: string,
+  tenantId: string,
+  updates: AppUpdateInfo[],
+  getDetectedAppsIndex: (tenantId: string) => Promise<TenantDetectedAppsIndex | null>
+): Promise<DriftInsert[]> {
+  const managedUpdates = updates.filter((u) => u.isManaged);
+  if (managedUpdates.length === 0) return [];
+
+  try {
+    const [detectedAppsIndex, graphToken] = await Promise.all([
+      getDetectedAppsIndex(tenantId),
+      getServicePrincipalToken(tenantId),
+    ]);
+    if (!detectedAppsIndex || !graphToken) return [];
+
+    const results = await computeDeploymentDriftForUpdates(managedUpdates, detectedAppsIndex, tenantId, graphToken);
+    const scannedAt = new Date().toISOString();
+    return results.map((result) => toDriftInsert(userId, tenantId, result, scannedAt));
+  } catch (error) {
+    console.error(`[deployment-drift] Failed for user ${userId} / tenant ${tenantId}:`, error);
+    return [];
+  }
+}
+
+function isCriticalUpdate(currentVersion: string, latestVersion: string): boolean {
+  const current = parseVersion(currentVersion || '0.0.0');
+  const latest = parseVersion(latestVersion || '0.0.0');
+  return latest.major > current.major;
+}
+
+/**
+ * Process auto-updates for detected updates. Supabase-only (app_update_policies
+ * has no SQLite equivalent) - never called from the SQLite branch.
  */
 async function processAutoUpdates(
   supabase: SupabaseClient,
@@ -178,27 +266,204 @@ async function processAutoUpdates(
   return result;
 }
 
-export async function GET(request: Request) {
-  // Verify cron secret
-  const authHeader = request.headers.get('authorization');
-  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+function makeTenantInventoryCache(supabase: SupabaseClient | null) {
+  // Cached per tenant for the lifetime of this run - the Graph app list and
+  // its matching/version lookups are identical for every user of a tenant, so
+  // a tenant with many users being checked only gets scanned once. A cached
+  // `null` means the tenant's Graph token/inventory fetch failed this run;
+  // don't retry it for every user, just skip.
+  const cache = new Map<string, TenantAppInventory | null>();
 
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  return async function getTenantInventory(tenantId: string): Promise<TenantAppInventory | null> {
+    if (cache.has(tenantId)) {
+      return cache.get(tenantId)!;
+    }
+    try {
+      const graphToken = await getServicePrincipalToken(tenantId);
+      if (!graphToken) {
+        cache.set(tenantId, null);
+        return null;
+      }
+      const inventory = await fetchTenantAppInventory(supabase, tenantId, graphToken);
+      cache.set(tenantId, inventory);
+      return inventory;
+    } catch (error) {
+      console.error(`Failed to fetch app inventory for tenant ${tenantId}:`, error);
+      cache.set(tenantId, null);
+      return null;
+    }
+  };
+}
 
-  if (!supabaseUrl || !supabaseServiceKey) {
-    return NextResponse.json(
-      { error: 'Missing Supabase configuration' },
-      { status: 500 }
+function makeDetectedAppsIndexCache() {
+  // Cached per tenant for the lifetime of this run, same reasoning as
+  // makeTenantInventoryCache: the tenant-wide detectedApps sweep is identical
+  // for every user of a tenant, so it only needs to run once per run.
+  const cache = new Map<string, TenantDetectedAppsIndex | null>();
+
+  return async function getDetectedAppsIndex(tenantId: string): Promise<TenantDetectedAppsIndex | null> {
+    if (cache.has(tenantId)) {
+      return cache.get(tenantId)!;
+    }
+    try {
+      const graphToken = await getServicePrincipalToken(tenantId);
+      if (!graphToken) {
+        cache.set(tenantId, null);
+        return null;
+      }
+      const index = await fetchTenantDetectedAppsIndex(tenantId, graphToken);
+      cache.set(tenantId, index);
+      return index;
+    } catch (error) {
+      console.error(`[deployment-drift] Failed to fetch detectedApps index for tenant ${tenantId}:`, error);
+      cache.set(tenantId, null);
+      return null;
+    }
+  };
+}
+
+/**
+ * Self-hosted SQLite branch. There's no notification_preferences/
+ * webhook_configurations/app_update_policies here (Supabase-only, not
+ * ported), so recipient discovery is simply every distinct (user, tenant)
+ * pair with deployment history. No auto-update triggering (nothing to read
+ * a policy from) and no ignore/pin filtering (filterUpdatesByPolicy no-ops
+ * without Supabase) - just detection and persistence.
+ */
+async function runSqliteModeCron(): Promise<NextResponse> {
+  const db = getDatabase();
+  const scanDeadline = Date.now() + SCAN_BUDGET_MS;
+  const getTenantInventory = makeTenantInventoryCache(null);
+  const getDetectedAppsIndex = makeDetectedAppsIndexCache();
+
+  const errors: string[] = [];
+  const allRows: UpdateCheckInsert[] = [];
+  const allDriftRows: DriftInsert[] = [];
+  const activeKeys = new Set<string>();
+  let totalUsersChecked = 0;
+  let scanBudgetExceeded = false;
+
+  try {
+    const pairs = await db.uploadHistory.getDistinctUserTenantPairs();
+
+    for (const { user_id: userId, intune_tenant_id: tenantId } of pairs) {
+      if (!tenantId) continue;
+      if (Date.now() >= scanDeadline) {
+        scanBudgetExceeded = true;
+        break;
+      }
+
+      totalUsersChecked++;
+
+      const inventory = await getTenantInventory(tenantId);
+      if (!inventory) {
+        errors.push(`Skipped tenant ${tenantId}: could not fetch app inventory`);
+        continue;
+      }
+
+      let updates;
+      try {
+        const result = await computeUserAppUpdates({ userId, tenantId, inventory });
+        updates = result.updates;
+      } catch (error) {
+        errors.push(
+          `Error computing updates for user ${userId} / tenant ${tenantId}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+        continue;
+      }
+
+      updates = updates.filter((u) => u.wingetId && u.currentVersion !== 'Unknown');
+
+      const now = new Date().toISOString();
+      for (const update of updates) {
+        const wingetId = update.wingetId as string;
+        const key = `${userId}:${tenantId}:${wingetId}:${update.intuneApp.id}`;
+        allRows.push({
+          user_id: userId,
+          tenant_id: tenantId,
+          winget_id: wingetId,
+          intune_app_id: update.intuneApp.id,
+          display_name: update.intuneApp.displayName,
+          current_version: update.currentVersion,
+          latest_version: update.latestVersion,
+          is_critical: isCriticalUpdate(update.currentVersion, update.latestVersion),
+          is_managed: update.isManaged,
+          large_icon_type: update.intuneApp.largeIcon?.type || null,
+          large_icon_value: update.intuneApp.largeIcon?.value || null,
+          notified_at: null,
+          dismissed_at: null,
+          detected_at: now,
+          updated_at: now,
+        });
+        activeKeys.add(key);
+      }
+
+      if (Date.now() < scanDeadline) {
+        allDriftRows.push(...(await computeDriftSafely(userId, tenantId, updates, getDetectedAppsIndex)));
+      }
+    }
+
+    if (scanBudgetExceeded) {
+      errors.push('Scan budget exceeded - remaining users/tenants will be checked on the next run');
+    }
+
+    if (allRows.length > 0) {
+      try {
+        await db.updateCheckResults.upsertMany(allRows);
+      } catch (error) {
+        errors.push(`Error upserting updates: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    if (allDriftRows.length > 0) {
+      try {
+        await db.deploymentDrift.upsertMany(allDriftRows);
+      } catch (error) {
+        errors.push(`Error upserting deployment drift: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    // Stale-row cleanup, skipped if the budget ran out (activeKeys would be
+    // incomplete, and still-valid rows for unreached users would be deleted).
+    if (!scanBudgetExceeded) {
+      const userIds = [...new Set(pairs.map((p) => p.user_id))];
+      const existingRows = await db.updateCheckResults.getByUserIds(userIds);
+      const staleIds = existingRows
+        .filter((row) => !activeKeys.has(`${row.user_id}:${row.tenant_id}:${row.winget_id}:${row.intune_app_id}`))
+        .map((row) => row.id);
+      if (staleIds.length > 0) {
+        await db.updateCheckResults.deleteByIds(staleIds);
+      }
+    }
+
+    await db.updateCheckResults.deleteOlderThan(
+      new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
     );
+    await db.deploymentDrift.deleteOlderThan(
+      new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
+    );
+
+    return NextResponse.json({
+      success: errors.length === 0,
+      usersChecked: totalUsersChecked,
+      updatesFound: allRows.length,
+      autoUpdates: { triggered: 0, skipped: 0, failed: 0 },
+      errors: errors.length > 0 ? errors : undefined,
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return NextResponse.json({ error: errorMessage }, { status: 500 });
   }
+}
 
+async function runSupabaseModeCron(supabaseUrl: string, supabaseServiceKey: string): Promise<NextResponse> {
   const supabase = createClient(supabaseUrl, supabaseServiceKey);
-
-  // Initialize auto-update trigger
   const autoUpdateTrigger = new AutoUpdateTrigger(supabaseUrl, supabaseServiceKey);
+  const scanDeadline = Date.now() + SCAN_BUDGET_MS;
+  const getTenantInventory = makeTenantInventoryCache(supabase);
+  const getDetectedAppsIndex = makeDetectedAppsIndexCache();
 
   try {
     // Get users with notifications enabled
@@ -259,59 +524,43 @@ export async function GET(request: Request) {
       });
     }
 
-    // Get all curated apps with their latest versions
-    const curatedApps = await getCatalogSource().getAllLatestVersions();
-
-    // Create a map for quick lookup
-    const latestVersions = new Map<string, string>();
-    curatedApps?.forEach((app) => {
-      if (app.latest_version) {
-        latestVersions.set(app.winget_id, app.latest_version);
-      }
-    });
-
-    // Get all ignore/pin policies to filter out updates
-    const { data: filterPolicies } = await supabase
-      .from('app_update_policies')
-      .select('user_id, tenant_id, winget_id, policy_type, pinned_version')
-      .in('policy_type', ['ignore', 'pin_version']);
-
-    // Create lookup for ignored apps
-    const ignoredApps = new Set<string>();
-    const pinnedVersions = new Map<string, string>();
-    filterPolicies?.forEach((policy) => {
-      const key = `${policy.user_id}:${policy.tenant_id}:${policy.winget_id}`;
-      if (policy.policy_type === 'ignore') {
-        ignoredApps.add(key);
-      } else if (policy.policy_type === 'pin_version' && policy.pinned_version) {
-        pinnedVersions.set(key, policy.pinned_version);
-      }
-    });
-
     let totalUpdatesFound = 0;
     let totalUsersChecked = 0;
     const errors: string[] = [];
     const allUpdates: UpdateCheckInsert[] = [];
+    const allDriftRows: DriftInsert[] = [];
     const activeUpdateKeys = new Set<string>();
+    let scanBudgetExceeded = false;
 
     // Process users in batches
     const userIdArray = Array.from(userIds);
 
-    for (let i = 0; i < userIdArray.length; i += BATCH_SIZE) {
+    outer: for (let i = 0; i < userIdArray.length; i += BATCH_SIZE) {
       const batch = userIdArray.slice(i, i + BATCH_SIZE);
 
-      // Get deployed apps for this batch of users
-      const { data: deployedApps, error: deployedError } = await supabase
+      // Distinct (user, tenant) pairs to check for this batch, derived from
+      // each user's own upload_history rows - the reliable existing source of
+      // user->tenant mapping in this codebase. Only the pairing is needed
+      // here; computeUserAppUpdates() re-reads each user's upload_history
+      // itself when building their per-user matches.
+      const { data: userTenantRows, error: userTenantError } = await supabase
         .from('upload_history')
-        .select('*')
+        .select('user_id, intune_tenant_id')
         .in('user_id', batch);
 
-      if (deployedError) {
-        errors.push(`Error fetching deployed apps: ${deployedError.message}`);
+      if (userTenantError) {
+        errors.push(`Error fetching user/tenant pairs: ${userTenantError.message}`);
         continue;
       }
 
-      if (!deployedApps || deployedApps.length === 0) {
+      const tenantPairs = new Map<string, { userId: string; tenantId: string }>();
+      (userTenantRows as UserTenantRow[] | null)?.forEach((row) => {
+        if (!row.intune_tenant_id) return;
+        const key = `${row.user_id}:${row.intune_tenant_id}`;
+        tenantPairs.set(key, { userId: row.user_id, tenantId: row.intune_tenant_id });
+      });
+
+      if (tenantPairs.size === 0) {
         continue;
       }
 
@@ -332,88 +581,70 @@ export async function GET(request: Request) {
           })
       );
 
-      // Group by user and tenant
-      const userTenantApps = new Map<string, UploadHistoryRecord[]>();
-      deployedApps.forEach((app: UploadHistoryRecord) => {
-        const key = `${app.user_id}:${app.intune_tenant_id || 'default'}`;
-        if (!userTenantApps.has(key)) {
-          userTenantApps.set(key, []);
-        }
-        userTenantApps.get(key)!.push(app);
-      });
-
-      // Check for updates
       const updates: UpdateCheckInsert[] = [];
 
-      for (const [key, apps] of userTenantApps) {
-        const [userId, tenantId] = key.split(':');
+      for (const { userId, tenantId } of tenantPairs.values()) {
+        if (Date.now() >= scanDeadline) {
+          scanBudgetExceeded = true;
+          break outer;
+        }
+
         totalUsersChecked++;
 
-        // Get unique apps by winget_id (keep the latest deployment)
-        const uniqueApps = new Map<string, UploadHistoryRecord>();
-        apps.forEach((app) => {
-          const existing = uniqueApps.get(app.winget_id);
-          if (!existing || compareVersions(app.version, existing.version) > 0) {
-            uniqueApps.set(app.winget_id, app);
-          }
-        });
+        const inventory = await getTenantInventory(tenantId);
+        if (!inventory) {
+          errors.push(`Skipped tenant ${tenantId}: could not fetch app inventory`);
+          continue;
+        }
 
-        for (const app of uniqueApps.values()) {
-          const latestVersion = latestVersions.get(app.winget_id);
-          if (!latestVersion) continue;
+        let userUpdates;
+        try {
+          const result = await computeUserAppUpdates({ userId, tenantId, inventory });
+          userUpdates = result.updates;
+        } catch (error) {
+          errors.push(
+            `Error computing updates for user ${userId} / tenant ${tenantId}: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          );
+          continue;
+        }
 
-          // Check if this app is ignored
-          const appKey = `${userId}:${tenantId}:${app.winget_id}`;
-          if (ignoredApps.has(appKey)) {
-            continue; // Skip ignored apps
-          }
+        userUpdates = userUpdates.filter((u) => u.wingetId && u.currentVersion !== 'Unknown');
+        userUpdates = await filterUpdatesByPolicy(supabase, userId, tenantId, userUpdates);
 
-          // Check if pinned to a specific version
-          const pinnedVersion = pinnedVersions.get(appKey);
-          if (pinnedVersion && latestVersion !== pinnedVersion) {
-            continue; // Skip if pinned to different version
-          }
+        for (const update of userUpdates) {
+          const wingetId = update.wingetId as string;
+          const key = `${userId}:${tenantId}:${wingetId}:${update.intuneApp.id}`;
+          const prior = priorMap.get(key);
+          const notifiedAt =
+            prior && prior.latest_version === update.latestVersion ? prior.notified_at : null;
 
-          // Compare versions
-          if (compareVersions(app.version, latestVersion) < 0) {
-            // Update available
-            const currentParsed = parseVersion(app.version);
-            const latestParsed = parseVersion(latestVersion);
+          const updateRecord: UpdateCheckInsert = {
+            user_id: userId,
+            tenant_id: tenantId,
+            winget_id: wingetId,
+            intune_app_id: update.intuneApp.id,
+            display_name: update.intuneApp.displayName,
+            current_version: update.currentVersion,
+            latest_version: update.latestVersion,
+            is_critical: isCriticalUpdate(update.currentVersion, update.latestVersion),
+            is_managed: update.isManaged,
+            large_icon_type: update.intuneApp.largeIcon?.type || null,
+            large_icon_value: update.intuneApp.largeIcon?.value || null,
+            notified_at: notifiedAt,
+            dismissed_at: null,
+            detected_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          };
 
-            // Check if it's a critical update (major version change)
-            const isCritical = latestParsed.major > currentParsed.major;
+          updates.push(updateRecord);
+          allUpdates.push(updateRecord);
+          activeUpdateKeys.add(key);
+        }
 
-            // Preserve notified_at only when the same version is still pending;
-            // a changed latest_version resets it so the new version notifies.
-            const prior = priorMap.get(
-              `${userId}:${tenantId}:${app.winget_id}:${app.intune_app_id}`
-            );
-            const notifiedAt =
-              prior && prior.latest_version === latestVersion ? prior.notified_at : null;
-
-            const updateRecord = {
-              user_id: userId,
-              tenant_id: tenantId,
-              winget_id: app.winget_id,
-              intune_app_id: app.intune_app_id,
-              display_name: app.display_name,
-              current_version: app.version,
-              latest_version: latestVersion,
-              is_critical: isCritical,
-              // The cron only ever scans apps from upload_history, so every
-              // detected update here is for an IntuneGet-managed app.
-              is_managed: true,
-              notified_at: notifiedAt,
-              detected_at: new Date().toISOString(),
-              updated_at: new Date().toISOString(),
-            };
-
-            updates.push(updateRecord);
-            allUpdates.push(updateRecord);
-            activeUpdateKeys.add(
-              `${userId}:${tenantId}:${app.winget_id}:${app.intune_app_id}`
-            );
-          }
+        if (Date.now() < scanDeadline) {
+          allDriftRows.push(...(await computeDriftSafely(userId, tenantId, userUpdates, getDetectedAppsIndex)));
         }
       }
 
@@ -438,9 +669,16 @@ export async function GET(request: Request) {
       }
     }
 
+    if (scanBudgetExceeded) {
+      errors.push('Scan budget exceeded - remaining users/tenants will be checked on the next run');
+    }
+
     // Remove stale rows for processed users that are no longer active.
     // This clears outdated entries from older Intune app objects and resolved updates.
-    if (userIdArray.length > 0) {
+    // Skipped when the scan budget ran out mid-run: activeUpdateKeys would be
+    // incomplete for the users not yet reached, and their still-valid rows
+    // would be wrongly deleted as "stale".
+    if (userIdArray.length > 0 && !scanBudgetExceeded) {
       const { data: existingRows, error: existingRowsError } = await supabase
         .from('update_check_results')
         .select('id, user_id, tenant_id, winget_id, intune_app_id')
@@ -466,6 +704,14 @@ export async function GET(request: Request) {
             errors.push(`Error deleting stale updates: ${staleDeleteError.message}`);
           }
         }
+      }
+    }
+
+    if (allDriftRows.length > 0) {
+      try {
+        await getDatabase().deploymentDrift.upsertMany(allDriftRows);
+      } catch (error) {
+        errors.push(`Error upserting deployment drift: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 
@@ -500,6 +746,14 @@ export async function GET(request: Request) {
       errors.push(`Cleanup error: ${cleanupError.message}`);
     }
 
+    try {
+      await getDatabase().deploymentDrift.deleteOlderThan(
+        new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
+      );
+    } catch (error) {
+      errors.push(`Deployment drift cleanup error: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
     return NextResponse.json({
       success: errors.length === 0,
       usersChecked: totalUsersChecked,
@@ -515,6 +769,23 @@ export async function GET(request: Request) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     return NextResponse.json({ error: errorMessage }, { status: 500 });
   }
+}
+
+export async function GET(request: Request) {
+  // Verify cron secret
+  const authHeader = request.headers.get('authorization');
+  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (supabaseUrl && supabaseServiceKey) {
+    return runSupabaseModeCron(supabaseUrl, supabaseServiceKey);
+  }
+
+  return runSqliteModeCron();
 }
 
 // Allow up to 5 minutes for the job to complete

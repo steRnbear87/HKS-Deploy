@@ -1,7 +1,7 @@
 'use client';
 
 import { T } from 'gt-next';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { Command } from 'cmdk';
 import {
@@ -13,12 +13,16 @@ import {
   ArrowUpCircle,
   BarChart3,
   Settings,
-  FolderSync,
+  Laptop,
   Lightbulb,
   Search,
   Keyboard,
+  Loader2,
+  ShieldAlert,
 } from 'lucide-react';
 import { SHORTCUT_HINTS } from '@/hooks/useKeyboardShortcuts';
+import { useDevices } from '@/hooks/use-devices';
+import { useDebounce } from '@/hooks/use-debounce';
 
 const NAVIGATION_ITEMS = [
   { name: 'Overview', href: '/dashboard', icon: LayoutDashboard, keywords: 'home dashboard overview' },
@@ -26,12 +30,15 @@ const NAVIGATION_ITEMS = [
   { name: 'Deployments', href: '/dashboard/uploads', icon: Rocket, keywords: 'uploads deploy jobs status' },
   { name: 'Discovered Apps', href: '/dashboard/unmanaged', icon: Radar, keywords: 'unmanaged discovered scan' },
   { name: 'Inventory', href: '/dashboard/inventory', icon: Server, keywords: 'deployed inventory intune' },
+  { name: 'Devices', href: '/dashboard/devices', icon: Laptop, keywords: 'devices intune managed laptops' },
   { name: 'App Updates', href: '/dashboard/updates', icon: ArrowUpCircle, keywords: 'updates upgrade versions' },
   { name: 'Reports', href: '/dashboard/reports', icon: BarChart3, keywords: 'analytics reports charts' },
-  { name: 'SCCM Migration', href: '/dashboard/sccm', icon: FolderSync, keywords: 'sccm migration configmgr' },
   { name: 'App Requests', href: '/dashboard/app-requests', icon: Lightbulb, keywords: 'suggestions requests vote' },
   { name: 'Settings', href: '/dashboard/settings', icon: Settings, keywords: 'settings preferences permissions' },
 ];
+
+const DEVICE_SEARCH_MIN_LENGTH = 2;
+const MAX_DEVICE_RESULTS = 8;
 
 interface CommandPaletteProps {
   open: boolean;
@@ -65,6 +72,22 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
     },
     [onOpenChange, router]
   );
+
+  const debouncedSearch = useDebounce(search, 200);
+  const shouldSearchDevices = open && debouncedSearch.trim().length >= DEVICE_SEARCH_MIN_LENGTH;
+  const { data: devicesData, isLoading: devicesLoading } = useDevices({ enabled: shouldSearchDevices });
+
+  const matchedDevices = useMemo(() => {
+    if (!shouldSearchDevices || !devicesData?.devices) return [];
+    const q = debouncedSearch.toLowerCase();
+    return devicesData.devices
+      .filter(
+        (d) =>
+          d.deviceName.toLowerCase().includes(q) ||
+          d.userPrincipalName?.toLowerCase().includes(q)
+      )
+      .slice(0, MAX_DEVICE_RESULTS);
+  }, [devicesData, debouncedSearch, shouldSearchDevices]);
 
   if (!open) return null;
 
@@ -118,6 +141,40 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                 </Command.Item>
               ))}
             </Command.Group>
+
+            {/* Devices group - live search, only once the query is long enough */}
+            {shouldSearchDevices && (
+              <Command.Group
+                heading={<T>Devices</T>}
+                className="[&_[cmdk-group-heading]]:text-[10px] [&_[cmdk-group-heading]]:font-semibold [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-[0.1em] [&_[cmdk-group-heading]]:text-text-muted [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:mt-2"
+              >
+                {devicesLoading && matchedDevices.length === 0 && (
+                  <div className="flex items-center gap-2 px-2 py-2 text-xs text-text-muted">
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    <T>Searching devices...</T>
+                  </div>
+                )}
+                {!devicesLoading && matchedDevices.length === 0 && (
+                  <div className="px-2 py-2 text-xs text-text-muted">
+                    <T>No matching devices</T>
+                  </div>
+                )}
+                {matchedDevices.map((device) => (
+                  <Command.Item
+                    key={device.id}
+                    value={`device ${device.deviceName} ${device.userPrincipalName ?? ''}`}
+                    onSelect={() => handleSelect(`/dashboard/devices/${device.id}`)}
+                    className="flex items-center gap-3 px-2 py-2 text-sm text-text-secondary rounded-lg cursor-pointer data-[selected=true]:bg-overlay/5 data-[selected=true]:text-text-primary transition-colors"
+                  >
+                    <Laptop className="w-4 h-4 flex-shrink-0" />
+                    <span className="truncate">{device.deviceName}</span>
+                    {device.complianceState === 'noncompliant' && (
+                      <ShieldAlert className="w-3 h-3 text-red-400 ml-auto flex-shrink-0" />
+                    )}
+                  </Command.Item>
+                ))}
+              </Command.Group>
+            )}
 
             {/* Keyboard shortcuts group */}
             {!search && (

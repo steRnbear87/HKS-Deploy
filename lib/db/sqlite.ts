@@ -6,7 +6,7 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
-import type { DatabaseAdapter, PackagingJob, UploadHistoryRecord } from './types';
+import type { DatabaseAdapter, PackagingJob, UploadHistoryRecord, DeviceHealthSnapshot, FleetAppInventoryRow, UpdateCheckResultRecord, DeploymentDriftRecord, DeviceBiosInfoRecord, DeviceUpdateGroupRecord } from './types';
 
 // Singleton database instance
 let db: Database.Database | null = null;
@@ -143,6 +143,138 @@ function initializeSchema(db: Database.Database): void {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_upload_history_user_id ON upload_history(user_id);
     CREATE INDEX IF NOT EXISTS idx_upload_history_deployed_at ON upload_history(deployed_at);
+  `);
+
+  // Create device_health_snapshots table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS device_health_snapshots (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      snapshot_date TEXT NOT NULL,
+      captured_at TEXT NOT NULL,
+      total_devices INTEGER NOT NULL DEFAULT 0,
+      compliant_count INTEGER NOT NULL DEFAULT 0,
+      noncompliant_count INTEGER NOT NULL DEFAULT 0,
+      in_grace_period_count INTEGER NOT NULL DEFAULT 0,
+      config_manager_count INTEGER NOT NULL DEFAULT 0,
+      unknown_count INTEGER NOT NULL DEFAULT 0,
+      stale_count INTEGER NOT NULL DEFAULT 0,
+      partial INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(tenant_id, snapshot_date)
+    )
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_device_health_snapshots_tenant_date ON device_health_snapshots(tenant_id, snapshot_date);
+  `);
+
+  // Create fleet_app_inventory table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS fleet_app_inventory (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      snapshot_date TEXT NOT NULL,
+      captured_at TEXT NOT NULL,
+      app_key TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      publisher TEXT,
+      device_count INTEGER NOT NULL DEFAULT 0,
+      devices_total INTEGER NOT NULL DEFAULT 0,
+      partial INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(tenant_id, snapshot_date, app_key)
+    )
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_fleet_app_inventory_tenant_date_count ON fleet_app_inventory(tenant_id, snapshot_date, device_count);
+  `);
+
+  // Create update_check_results table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS update_check_results (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      tenant_id TEXT NOT NULL,
+      winget_id TEXT NOT NULL,
+      intune_app_id TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      current_version TEXT NOT NULL,
+      latest_version TEXT NOT NULL,
+      is_critical INTEGER NOT NULL DEFAULT 0,
+      is_managed INTEGER NOT NULL DEFAULT 1,
+      large_icon_type TEXT,
+      large_icon_value TEXT,
+      notified_at TEXT,
+      dismissed_at TEXT,
+      detected_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(user_id, tenant_id, winget_id, intune_app_id)
+    )
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_update_check_results_user ON update_check_results(user_id);
+  `);
+
+  // Create deployment_drift_results table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS deployment_drift_results (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      tenant_id TEXT NOT NULL,
+      winget_id TEXT NOT NULL,
+      intune_app_id TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      expected_version TEXT NOT NULL,
+      total_devices_scanned INTEGER NOT NULL DEFAULT 0,
+      on_expected_count INTEGER NOT NULL DEFAULT 0,
+      behind_count INTEGER NOT NULL DEFAULT 0,
+      ahead_count INTEGER NOT NULL DEFAULT 0,
+      partial INTEGER NOT NULL DEFAULT 0,
+      scanned_at TEXT NOT NULL,
+      UNIQUE(user_id, tenant_id, winget_id, intune_app_id)
+    )
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_deployment_drift_results_user ON deployment_drift_results(user_id);
+  `);
+
+  // Create device_bios_info table - a current-state cache (one row per
+  // device, upserted in place), not a daily-accumulating snapshot.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS device_bios_info (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      device_id TEXT NOT NULL,
+      bios_version TEXT,
+      captured_at TEXT NOT NULL,
+      UNIQUE(tenant_id, device_id)
+    )
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_device_bios_info_tenant ON device_bios_info(tenant_id);
+  `);
+
+  // Maps each device to its tool-managed single-device Entra ID group, since
+  // Intune's Windows Update Graph resources only support group assignment.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS device_update_groups (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      device_id TEXT NOT NULL,
+      azure_ad_device_id TEXT NOT NULL,
+      entra_group_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(tenant_id, device_id)
+    )
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_device_update_groups_tenant ON device_update_groups(tenant_id);
   `);
 }
 
@@ -507,8 +639,436 @@ export const sqliteDb: DatabaseAdapter = {
       `);
       return stmt.all(userId, limit) as UploadHistoryRecord[];
     },
+
+    async getDistinctUserTenantPairs(): Promise<Array<{ user_id: string; intune_tenant_id: string | null }>> {
+      const database = getDb();
+      return database
+        .prepare('SELECT DISTINCT user_id, intune_tenant_id FROM upload_history WHERE intune_tenant_id IS NOT NULL')
+        .all() as Array<{ user_id: string; intune_tenant_id: string | null }>;
+    },
+  },
+
+  deviceHealthSnapshots: {
+    async upsert(snapshot: Omit<DeviceHealthSnapshot, 'id' | 'created_at'>): Promise<DeviceHealthSnapshot> {
+      const database = getDb();
+      const id = crypto.randomUUID();
+
+      const stmt = database.prepare(`
+        INSERT INTO device_health_snapshots (
+          id, tenant_id, snapshot_date, captured_at, total_devices, compliant_count,
+          noncompliant_count, in_grace_period_count, config_manager_count, unknown_count,
+          stale_count, partial
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(tenant_id, snapshot_date) DO UPDATE SET
+          captured_at = excluded.captured_at,
+          total_devices = excluded.total_devices,
+          compliant_count = excluded.compliant_count,
+          noncompliant_count = excluded.noncompliant_count,
+          in_grace_period_count = excluded.in_grace_period_count,
+          config_manager_count = excluded.config_manager_count,
+          unknown_count = excluded.unknown_count,
+          stale_count = excluded.stale_count,
+          partial = excluded.partial
+      `);
+
+      stmt.run(
+        id,
+        snapshot.tenant_id,
+        snapshot.snapshot_date,
+        snapshot.captured_at,
+        snapshot.total_devices,
+        snapshot.compliant_count,
+        snapshot.noncompliant_count,
+        snapshot.in_grace_period_count,
+        snapshot.config_manager_count,
+        snapshot.unknown_count,
+        snapshot.stale_count,
+        snapshot.partial ? 1 : 0
+      );
+
+      const row = database
+        .prepare('SELECT * FROM device_health_snapshots WHERE tenant_id = ? AND snapshot_date = ?')
+        .get(snapshot.tenant_id, snapshot.snapshot_date) as Record<string, unknown>;
+      return { ...row, partial: !!row.partial } as DeviceHealthSnapshot;
+    },
+
+    async getByTenantId(tenantId: string, sinceDate: string): Promise<DeviceHealthSnapshot[]> {
+      const database = getDb();
+      const stmt = database.prepare(`
+        SELECT * FROM device_health_snapshots
+        WHERE tenant_id = ? AND snapshot_date >= ?
+        ORDER BY snapshot_date ASC
+      `);
+      const rows = stmt.all(tenantId, sinceDate) as Record<string, unknown>[];
+      return rows.map((row) => ({ ...row, partial: !!row.partial }) as DeviceHealthSnapshot);
+    },
+
+    async getLatest(tenantId: string): Promise<DeviceHealthSnapshot | null> {
+      const database = getDb();
+      const row = database
+        .prepare('SELECT * FROM device_health_snapshots WHERE tenant_id = ? ORDER BY snapshot_date DESC LIMIT 1')
+        .get(tenantId) as Record<string, unknown> | undefined;
+      return row ? ({ ...row, partial: !!row.partial } as DeviceHealthSnapshot) : null;
+    },
+
+    async deleteOlderThan(cutoffDate: string): Promise<number> {
+      const database = getDb();
+      const result = database
+        .prepare('DELETE FROM device_health_snapshots WHERE snapshot_date < ?')
+        .run(cutoffDate);
+      return result.changes;
+    },
+
+    async getKnownTenantIds(): Promise<string[]> {
+      const database = getDb();
+      const rows = database
+        .prepare('SELECT DISTINCT tenant_id FROM packaging_jobs WHERE tenant_id IS NOT NULL')
+        .all() as Array<{ tenant_id: string }>;
+      return rows.map((row) => row.tenant_id);
+    },
+  },
+
+  fleetAppInventory: {
+    async replaceForDate(
+      tenantId: string,
+      snapshotDate: string,
+      rows: Array<Omit<FleetAppInventoryRow, 'id' | 'created_at' | 'tenant_id' | 'snapshot_date'>>
+    ): Promise<void> {
+      const database = getDb();
+      const deleteStmt = database.prepare(
+        'DELETE FROM fleet_app_inventory WHERE tenant_id = ? AND snapshot_date = ?'
+      );
+      const insertStmt = database.prepare(`
+        INSERT INTO fleet_app_inventory (
+          id, tenant_id, snapshot_date, captured_at, app_key, display_name, publisher,
+          device_count, devices_total, partial
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+
+      const runReplace = database.transaction(() => {
+        deleteStmt.run(tenantId, snapshotDate);
+        for (const row of rows) {
+          insertStmt.run(
+            crypto.randomUUID(),
+            tenantId,
+            snapshotDate,
+            row.captured_at,
+            row.app_key,
+            row.display_name,
+            row.publisher,
+            row.device_count,
+            row.devices_total,
+            row.partial ? 1 : 0
+          );
+        }
+      });
+      runReplace();
+    },
+
+    async getLatestForTenant(tenantId: string, limit: number = 20): Promise<FleetAppInventoryRow[]> {
+      const database = getDb();
+      const latestDateRow = database
+        .prepare('SELECT MAX(snapshot_date) as snapshot_date FROM fleet_app_inventory WHERE tenant_id = ?')
+        .get(tenantId) as { snapshot_date: string | null } | undefined;
+
+      if (!latestDateRow?.snapshot_date) return [];
+
+      const rows = database
+        .prepare(
+          'SELECT * FROM fleet_app_inventory WHERE tenant_id = ? AND snapshot_date = ? ORDER BY device_count DESC LIMIT ?'
+        )
+        .all(tenantId, latestDateRow.snapshot_date, limit) as Record<string, unknown>[];
+
+      return rows.map((row) => ({ ...row, partial: !!row.partial }) as FleetAppInventoryRow);
+    },
+
+    async deleteOlderThan(cutoffDate: string): Promise<number> {
+      const database = getDb();
+      const result = database
+        .prepare('DELETE FROM fleet_app_inventory WHERE snapshot_date < ?')
+        .run(cutoffDate);
+      return result.changes;
+    },
+  },
+
+  updateCheckResults: {
+    async upsertMany(rows: Array<Omit<UpdateCheckResultRecord, 'id'>>): Promise<void> {
+      if (rows.length === 0) return;
+      const database = getDb();
+      const stmt = database.prepare(`
+        INSERT INTO update_check_results (
+          id, user_id, tenant_id, winget_id, intune_app_id, display_name,
+          current_version, latest_version, is_critical, is_managed,
+          large_icon_type, large_icon_value, notified_at, dismissed_at,
+          detected_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id, tenant_id, winget_id, intune_app_id) DO UPDATE SET
+          display_name = excluded.display_name,
+          current_version = excluded.current_version,
+          latest_version = excluded.latest_version,
+          is_critical = excluded.is_critical,
+          is_managed = excluded.is_managed,
+          large_icon_type = excluded.large_icon_type,
+          large_icon_value = excluded.large_icon_value,
+          notified_at = excluded.notified_at,
+          detected_at = excluded.detected_at,
+          updated_at = excluded.updated_at
+      `);
+
+      const runUpsert = database.transaction(() => {
+        for (const row of rows) {
+          stmt.run(
+            crypto.randomUUID(),
+            row.user_id,
+            row.tenant_id,
+            row.winget_id,
+            row.intune_app_id,
+            row.display_name,
+            row.current_version,
+            row.latest_version,
+            row.is_critical ? 1 : 0,
+            row.is_managed ? 1 : 0,
+            row.large_icon_type,
+            row.large_icon_value,
+            row.notified_at,
+            row.dismissed_at,
+            row.detected_at,
+            row.updated_at
+          );
+        }
+      });
+      runUpsert();
+    },
+
+    async getByUserId(
+      userId: string,
+      opts: { tenantId?: string; includeDismissed?: boolean; criticalOnly?: boolean } = {}
+    ): Promise<UpdateCheckResultRecord[]> {
+      const database = getDb();
+      const conditions = ['user_id = ?'];
+      const params: unknown[] = [userId];
+
+      if (opts.tenantId) {
+        conditions.push('tenant_id = ?');
+        params.push(opts.tenantId);
+      }
+      if (!opts.includeDismissed) {
+        conditions.push('dismissed_at IS NULL');
+      }
+      if (opts.criticalOnly) {
+        conditions.push('is_critical = 1');
+      }
+
+      const rows = database
+        .prepare(`SELECT * FROM update_check_results WHERE ${conditions.join(' AND ')} ORDER BY detected_at DESC`)
+        .all(...params) as Record<string, unknown>[];
+
+      return rows.map((row) => rowToUpdateCheckResult(row));
+    },
+
+    async getByUserIds(userIds: string[]): Promise<UpdateCheckResultRecord[]> {
+      if (userIds.length === 0) return [];
+      const database = getDb();
+      const placeholders = userIds.map(() => '?').join(', ');
+      const rows = database
+        .prepare(`SELECT * FROM update_check_results WHERE user_id IN (${placeholders})`)
+        .all(...userIds) as Record<string, unknown>[];
+      return rows.map((row) => rowToUpdateCheckResult(row));
+    },
+
+    async setDismissed(ids: string[], userId: string, dismissed: boolean): Promise<number> {
+      if (ids.length === 0) return 0;
+      const database = getDb();
+      const placeholders = ids.map(() => '?').join(', ');
+      const now = new Date().toISOString();
+      const result = database
+        .prepare(
+          `UPDATE update_check_results SET dismissed_at = ?, updated_at = ? WHERE user_id = ? AND id IN (${placeholders})`
+        )
+        .run(dismissed ? now : null, now, userId, ...ids);
+      return result.changes;
+    },
+
+    async deleteByIds(ids: string[]): Promise<number> {
+      if (ids.length === 0) return 0;
+      const database = getDb();
+      const placeholders = ids.map(() => '?').join(', ');
+      const result = database.prepare(`DELETE FROM update_check_results WHERE id IN (${placeholders})`).run(...ids);
+      return result.changes;
+    },
+
+    async deleteByUserTenantWinget(userId: string, tenantId: string, wingetId: string): Promise<number> {
+      const database = getDb();
+      const result = database
+        .prepare('DELETE FROM update_check_results WHERE user_id = ? AND tenant_id = ? AND winget_id = ?')
+        .run(userId, tenantId, wingetId);
+      return result.changes;
+    },
+
+    async deleteOlderThan(cutoffDate: string): Promise<number> {
+      const database = getDb();
+      const result = database
+        .prepare('DELETE FROM update_check_results WHERE detected_at < ?')
+        .run(cutoffDate);
+      return result.changes;
+    },
+  },
+
+  deploymentDrift: {
+    async upsertMany(rows: Array<Omit<DeploymentDriftRecord, 'id'>>): Promise<void> {
+      if (rows.length === 0) return;
+      const database = getDb();
+      const stmt = database.prepare(`
+        INSERT INTO deployment_drift_results (
+          id, user_id, tenant_id, winget_id, intune_app_id, display_name,
+          expected_version, total_devices_scanned, on_expected_count,
+          behind_count, ahead_count, partial, scanned_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id, tenant_id, winget_id, intune_app_id) DO UPDATE SET
+          display_name = excluded.display_name,
+          expected_version = excluded.expected_version,
+          total_devices_scanned = excluded.total_devices_scanned,
+          on_expected_count = excluded.on_expected_count,
+          behind_count = excluded.behind_count,
+          ahead_count = excluded.ahead_count,
+          partial = excluded.partial,
+          scanned_at = excluded.scanned_at
+      `);
+
+      const runUpsert = database.transaction(() => {
+        for (const row of rows) {
+          stmt.run(
+            crypto.randomUUID(),
+            row.user_id,
+            row.tenant_id,
+            row.winget_id,
+            row.intune_app_id,
+            row.display_name,
+            row.expected_version,
+            row.total_devices_scanned,
+            row.on_expected_count,
+            row.behind_count,
+            row.ahead_count,
+            row.partial ? 1 : 0,
+            row.scanned_at
+          );
+        }
+      });
+      runUpsert();
+    },
+
+    async getByUserId(
+      userId: string,
+      opts: { tenantId?: string } = {}
+    ): Promise<DeploymentDriftRecord[]> {
+      const database = getDb();
+      const conditions = ['user_id = ?'];
+      const params: unknown[] = [userId];
+
+      if (opts.tenantId) {
+        conditions.push('tenant_id = ?');
+        params.push(opts.tenantId);
+      }
+
+      const rows = database
+        .prepare(`SELECT * FROM deployment_drift_results WHERE ${conditions.join(' AND ')}`)
+        .all(...params) as Record<string, unknown>[];
+
+      return rows.map((row) => rowToDeploymentDrift(row));
+    },
+
+    async deleteOlderThan(cutoffDate: string): Promise<number> {
+      const database = getDb();
+      const result = database
+        .prepare('DELETE FROM deployment_drift_results WHERE scanned_at < ?')
+        .run(cutoffDate);
+      return result.changes;
+    },
+  },
+
+  deviceBiosInfo: {
+    async upsertMany(rows: Array<Omit<DeviceBiosInfoRecord, 'id'>>): Promise<void> {
+      if (rows.length === 0) return;
+      const database = getDb();
+      const stmt = database.prepare(`
+        INSERT INTO device_bios_info (id, tenant_id, device_id, bios_version, captured_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(tenant_id, device_id) DO UPDATE SET
+          bios_version = excluded.bios_version,
+          captured_at = excluded.captured_at
+      `);
+
+      const runUpsert = database.transaction(() => {
+        for (const row of rows) {
+          stmt.run(crypto.randomUUID(), row.tenant_id, row.device_id, row.bios_version, row.captured_at);
+        }
+      });
+      runUpsert();
+    },
+
+    async getByTenantId(tenantId: string): Promise<DeviceBiosInfoRecord[]> {
+      const database = getDb();
+      const rows = database
+        .prepare('SELECT * FROM device_bios_info WHERE tenant_id = ?')
+        .all(tenantId) as Record<string, unknown>[];
+      return rows as unknown as DeviceBiosInfoRecord[];
+    },
+
+    async pruneRemoved(tenantId: string, currentDeviceIds: string[]): Promise<number> {
+      const database = getDb();
+      if (currentDeviceIds.length === 0) {
+        const result = database.prepare('DELETE FROM device_bios_info WHERE tenant_id = ?').run(tenantId);
+        return result.changes;
+      }
+      const placeholders = currentDeviceIds.map(() => '?').join(', ');
+      const result = database
+        .prepare(`DELETE FROM device_bios_info WHERE tenant_id = ? AND device_id NOT IN (${placeholders})`)
+        .run(tenantId, ...currentDeviceIds);
+      return result.changes;
+    },
+  },
+
+  deviceUpdateGroups: {
+    async getByDeviceId(tenantId: string, deviceId: string): Promise<DeviceUpdateGroupRecord | null> {
+      const database = getDb();
+      const row = database
+        .prepare('SELECT * FROM device_update_groups WHERE tenant_id = ? AND device_id = ?')
+        .get(tenantId, deviceId) as Record<string, unknown> | undefined;
+      return (row as unknown as DeviceUpdateGroupRecord) || null;
+    },
+
+    async upsert(row: Omit<DeviceUpdateGroupRecord, 'id' | 'created_at'>): Promise<DeviceUpdateGroupRecord> {
+      const database = getDb();
+      const id = crypto.randomUUID();
+      const createdAt = new Date().toISOString();
+      database
+        .prepare(
+          `INSERT INTO device_update_groups (id, tenant_id, device_id, azure_ad_device_id, entra_group_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(tenant_id, device_id) DO UPDATE SET
+             azure_ad_device_id = excluded.azure_ad_device_id,
+             entra_group_id = excluded.entra_group_id`
+        )
+        .run(id, row.tenant_id, row.device_id, row.azure_ad_device_id, row.entra_group_id, createdAt);
+      return (await sqliteDb.deviceUpdateGroups.getByDeviceId(row.tenant_id, row.device_id))!;
+    },
   },
 };
+
+function rowToUpdateCheckResult(row: Record<string, unknown>): UpdateCheckResultRecord {
+  return {
+    ...row,
+    is_critical: !!row.is_critical,
+    is_managed: !!row.is_managed,
+  } as UpdateCheckResultRecord;
+}
+
+function rowToDeploymentDrift(row: Record<string, unknown>): DeploymentDriftRecord {
+  return {
+    ...row,
+    partial: !!row.partial,
+  } as DeploymentDriftRecord;
+}
 
 /**
  * Close the database connection (for cleanup)

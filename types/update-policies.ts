@@ -184,6 +184,17 @@ export interface AvailableUpdate {
     last_auto_update_version: string | null;
     consecutive_failures: number;
   } | null;
+  // Rollout/drift status from the daily deployment-drift scan (managed apps
+  // only, cron-computed - null/absent means no scan has matched this app yet).
+  rollout?: {
+    expectedVersion: string;
+    totalScanned: number;
+    onExpected: number;
+    behind: number;
+    ahead: number;
+    partial: boolean;
+    scannedAt: string;
+  } | null;
 }
 
 /**

@@ -15,15 +15,36 @@ import {
   KeyRound,
   Rocket,
   RotateCcw,
+  ShieldAlert,
+  ArrowUpCircle,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip';
 import { useMicrosoftAuth } from '@/hooks/useMicrosoftAuth';
 import { AdminConsentBanner } from '@/components/AdminConsentBanner';
 import { FilterPermissionNudge } from '@/components/FilterPermissionNudge';
 import { useDashboardStats } from '@/hooks/useAnalytics';
 import { useOnboardingStatus } from '@/hooks/useOnboardingStatus';
-import { RecentActivityList, PageHeader } from '@/components/dashboard';
+import {
+  RecentActivityList,
+  PageHeader,
+  DevicePlatformBreakdown,
+  DeviceEncryptionRollup,
+  DevicesDonutChart,
+  FleetWindowsUpdateCard,
+  TopInstalledAppsWidget,
+} from '@/components/dashboard';
 import { useUserSettings } from '@/components/providers/UserSettingsProvider';
+import { useDevices } from '@/hooks/use-devices';
+import { useAvailableUpdates } from '@/hooks/use-updates';
+import { useMspOptional } from '@/hooks/useMspOptional';
+import {
+  summarizeDeviceHealth,
+  summarizeDevicePlatforms,
+  summarizeDeviceEncryption,
+  STALE_DAYS,
+} from '@/lib/intune/device-health';
+import { getFirstName } from '@/lib/utils';
 import { T, Var } from 'gt-next';
 
 function getTimeBasedGreeting(): React.ReactNode {
@@ -38,6 +59,35 @@ export default function DashboardPage() {
   const { data: stats, isLoading: statsLoading } = useDashboardStats();
   const { errorType } = useOnboardingStatus();
   const { settings, setQuickStartDismissed } = useUserSettings();
+  const { isMspUser, selectedTenantId } = useMspOptional();
+  const { data: devicesData } = useDevices();
+  const { data: updatesData } = useAvailableUpdates({
+    tenantId: isMspUser ? selectedTenantId || undefined : undefined,
+  });
+  // Only fires when there are zero managed updates, to tell the user whether
+  // that's because everything is genuinely current or because updates exist
+  // for apps not deployed through IntuneGet (same distinction the App
+  // Updates page's own empty state makes - keep the two in sync).
+  const { data: unmanagedUpdatesData } = useAvailableUpdates({
+    tenantId: isMspUser ? selectedTenantId || undefined : undefined,
+    includeUnmanaged: true,
+    enabled: !!updatesData && updatesData.count === 0,
+  });
+  const hiddenUnmanagedUpdateCount = updatesData && updatesData.count === 0
+    ? unmanagedUpdatesData?.updates.filter((u) => !u.is_managed).length ?? 0
+    : 0;
+  const deviceStats = useMemo(
+    () => (devicesData?.devices ? summarizeDeviceHealth(devicesData.devices) : null),
+    [devicesData]
+  );
+  const platformCounts = useMemo(
+    () => (devicesData?.devices ? summarizeDevicePlatforms(devicesData.devices) : null),
+    [devicesData]
+  );
+  const encryptionCounts = useMemo(
+    () => (devicesData?.devices ? summarizeDeviceEncryption(devicesData.devices) : null),
+    [devicesData]
+  );
   const [mounted, setMounted] = useState(false);
   const [greeting, setGreeting] = useState<React.ReactNode>(<T>Welcome back</T>);
 
@@ -90,14 +140,64 @@ export default function DashboardPage() {
       });
     }
 
+    if (deviceStats && (deviceStats.nonCompliant > 0 || deviceStats.stale > 0)) {
+      items.push({
+        id: 'device-health',
+        icon: ShieldAlert,
+        title: <T>Device fleet needs attention</T>,
+        description:
+          deviceStats.nonCompliant > 0 && deviceStats.stale > 0 ? (
+            <T>
+              <Var>{deviceStats.nonCompliant}</Var> non-compliant, <Var>{deviceStats.stale}</Var> not
+              synced in {STALE_DAYS}+ days
+            </T>
+          ) : deviceStats.nonCompliant > 0 ? (
+            <T><Var>{deviceStats.nonCompliant}</Var> device(s) non-compliant</T>
+          ) : (
+            <T><Var>{deviceStats.stale}</Var> device(s) haven&apos;t synced in {STALE_DAYS}+ days</T>
+          ),
+        href: '/dashboard/devices',
+        actionLabel: <T>View Devices</T>,
+        color: 'warning',
+      });
+    }
+
+    if (updatesData && updatesData.count > 0) {
+      items.push({
+        id: 'available-updates',
+        icon: ArrowUpCircle,
+        title: updatesData.count !== 1
+          ? <T><Var>{updatesData.count}</Var> app updates available</T>
+          : <T><Var>{updatesData.count}</Var> app update available</T>,
+        description: updatesData.criticalCount > 0
+          ? <T><Var>{updatesData.criticalCount}</Var> critical - review and deploy</T>
+          : <T>Review and deploy available updates</T>,
+        href: '/dashboard/updates',
+        actionLabel: <T>View Updates</T>,
+        color: updatesData.criticalCount > 0 ? 'error' : 'cyan',
+      });
+    } else if (hiddenUnmanagedUpdateCount > 0) {
+      items.push({
+        id: 'unmanaged-updates',
+        icon: ArrowUpCircle,
+        title: hiddenUnmanagedUpdateCount !== 1
+          ? <T><Var>{hiddenUnmanagedUpdateCount}</Var> updates detected for apps not deployed through HKS App Deployment</T>
+          : <T><Var>{hiddenUnmanagedUpdateCount}</Var> update detected for an app not deployed through HKS App Deployment</T>,
+        description: <T>Matched automatically - review with care before deploying</T>,
+        href: '/dashboard/updates',
+        actionLabel: <T>View Updates</T>,
+        color: 'cyan',
+      });
+    }
+
     return items;
-  }, [stats, errorType]);
+  }, [stats, errorType, deviceStats, updatesData, hiddenUnmanagedUpdateCount]);
 
   return (
     <div className="space-y-8">
       {/* Welcome header using PageHeader */}
       <PageHeader
-        title={<T><Var>{greeting}</Var>, <Var>{user?.name?.split(' ')[0] || 'User'}</Var></T>}
+        title={<T><Var>{greeting}</Var>, <Var>{getFirstName(user?.name, 'User')}</Var></T>}
         description={<T>Deploy Windows applications to Intune with precision and ease</T>}
         gradient
         gradientColors="cyan"
@@ -109,54 +209,53 @@ export default function DashboardPage() {
       {/* Non-blocking nudge to re-consent for the assignment-filters permission */}
       <FilterPermissionNudge />
 
-      {/* Needs Attention section */}
+      {/* Needs Attention - compact circular badges, right-aligned above the
+          stat cards (roughly over the Failed card) instead of full banners */}
       {attentionItems.length > 0 && (
-        <div className={mounted ? 'animate-fade-up stagger-1' : 'opacity-0'}>
-          <div className="space-y-3">
+        <TooltipProvider delayDuration={100}>
+          <div className={`flex justify-end gap-3 ${mounted ? 'animate-fade-up stagger-1' : 'opacity-0'}`}>
             {attentionItems.map((item) => {
               const colorMap = {
                 error: {
-                  border: 'border-l-status-error',
-                  bg: 'from-status-error/5',
-                  iconColor: 'text-status-error',
+                  bg: 'bg-status-error/10',
+                  border: 'border-status-error/30',
+                  icon: 'text-status-error',
+                  dot: 'bg-status-error',
                 },
                 warning: {
-                  border: 'border-l-status-warning',
-                  bg: 'from-status-warning/5',
-                  iconColor: 'text-status-warning',
+                  bg: 'bg-status-warning/10',
+                  border: 'border-status-warning/30',
+                  icon: 'text-status-warning',
+                  dot: 'bg-status-warning',
                 },
                 cyan: {
-                  border: 'border-l-accent-cyan',
-                  bg: 'from-accent-cyan/5',
-                  iconColor: 'text-accent-cyan',
+                  bg: 'bg-accent-cyan/10',
+                  border: 'border-accent-cyan/30',
+                  icon: 'text-accent-cyan',
+                  dot: 'bg-accent-cyan',
                 },
               };
               const colors = colorMap[item.color];
               return (
-                <div
-                  key={item.id}
-                  className={`glass-light rounded-xl p-4 border-l-4 ${colors.border} border-t border-r border-b border-black/[0.08] bg-gradient-to-r ${colors.bg} to-transparent`}
-                >
-                  <div className="flex items-center justify-between gap-4">
-                    <div className="flex items-center gap-3 min-w-0">
-                      <item.icon className={`w-5 h-5 ${colors.iconColor} flex-shrink-0`} />
-                      <div className="min-w-0">
-                        <p className="text-sm font-medium text-text-primary">{item.title}</p>
-                        <p className="text-xs text-text-muted">{item.description}</p>
-                      </div>
-                    </div>
-                    <Link href={item.href}>
-                      <Button size="sm" variant="ghost" className="text-text-secondary hover:text-text-primary flex-shrink-0">
-                        {item.actionLabel}
-                        <ArrowRight className="w-3.5 h-3.5 ml-1.5" />
-                      </Button>
+                <Tooltip key={item.id}>
+                  <TooltipTrigger asChild>
+                    <Link
+                      href={item.href}
+                      className={`relative w-11 h-11 rounded-full flex items-center justify-center border transition-transform hover:scale-105 ${colors.bg} ${colors.border}`}
+                    >
+                      <item.icon className={`w-5 h-5 ${colors.icon}`} />
+                      <span className={`absolute -top-0.5 -right-0.5 w-3 h-3 rounded-full ring-2 ring-bg-deepest ${colors.dot}`} />
                     </Link>
-                  </div>
-                </div>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="max-w-[260px]">
+                    <p className="font-medium text-text-primary">{item.title}</p>
+                    <p className="text-text-muted text-xs mt-0.5">{item.description}</p>
+                  </TooltipContent>
+                </Tooltip>
               );
             })}
           </div>
-        </div>
+        </TooltipProvider>
       )}
 
       {/* Stat cards */}
@@ -350,6 +449,22 @@ export default function DashboardPage() {
           </Link>
         </div>
       </div>
+
+      {/* Fleet overview - device platform mix, encryption, and Windows Update status across the tenant */}
+      {platformCounts && platformCounts.total > 0 && (
+        <div className="space-y-4">
+          <h2 className="text-lg font-semibold text-text-primary"><T>Fleet Overview</T></h2>
+
+          <DevicePlatformBreakdown counts={platformCounts} />
+
+          <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-4">
+            {encryptionCounts && <DeviceEncryptionRollup counts={encryptionCounts} />}
+            <DevicesDonutChart platformCounts={platformCounts} nonCompliantCount={deviceStats?.nonCompliant ?? 0} />
+            <FleetWindowsUpdateCard />
+            <TopInstalledAppsWidget />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

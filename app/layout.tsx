@@ -3,7 +3,6 @@ import localFont from "next/font/local";
 import "./globals.css";
 import { Toaster } from "@/components/ui/toaster";
 import { PublicThemeProvider } from "@/components/providers/theme-context";
-import { CookieConsentBanner } from '@/components/consent/CookieConsentBanner';
 import { PlausibleLoader } from '@/components/analytics/PlausibleLoader';
 import { GTProvider, T } from "gt-next";
 import { getLocale } from "gt-next/server";
@@ -25,9 +24,9 @@ const jetbrainsMono = localFont({
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://intuneget.com"),
-  title: "IntuneGet | Free Intune App Deployment Tool - Deploy Winget Apps in Minutes",
+  title: "HKS App Deployment | Deploy Winget Apps to Microsoft Intune",
   description:
-    "Deploy any Winget app to Microsoft Intune in about 5 minutes. Free, open-source tool. No scripting, no IntuneWin packaging, no per-device licensing.",
+    "HKS's internal tool for deploying Winget apps to Microsoft Intune in about 5 minutes. No scripting, no IntuneWin packaging, no per-device licensing.",
   keywords: [
     "Intune app deployment",
     "Winget Intune",
@@ -44,7 +43,7 @@ export const metadata: Metadata = {
   ],
   authors: [{ name: "Ugur Koc", url: "https://github.com/ugurkocde" }],
   creator: "Ugur Koc",
-  publisher: "IntuneGet",
+  publisher: "HKS App Deployment",
   alternates: {
     canonical: "https://intuneget.com",
   },
@@ -52,24 +51,24 @@ export const metadata: Metadata = {
     type: "website",
     locale: "en_US",
     url: "https://intuneget.com",
-    title: "IntuneGet - Deploy Winget Apps to Intune for Free",
+    title: "HKS App Deployment - Deploy Winget Apps to Intune",
     description:
-      "Deploy any Winget app to Microsoft Intune in about 5 minutes. Free, open-source tool with no scripting required.",
-    siteName: "IntuneGet",
+      "HKS's internal tool for deploying Winget apps to Microsoft Intune in about 5 minutes, with no scripting required.",
+    siteName: "HKS App Deployment",
     images: [
       {
         url: "/og-image.png",
         width: 1200,
         height: 630,
-        alt: "IntuneGet - Free Intune App Deployment Tool for Winget Apps",
+        alt: "HKS App Deployment - Intune App Deployment Tool for Winget Apps",
       },
     ],
   },
   twitter: {
     card: "summary_large_image",
-    title: "IntuneGet - Deploy Winget Apps to Intune for Free",
+    title: "HKS App Deployment - Deploy Winget Apps to Intune",
     description:
-      "Deploy any Winget app to Microsoft Intune in about 5 minutes. Free, open-source tool with no scripting required.",
+      "HKS's internal tool for deploying Winget apps to Microsoft Intune in about 5 minutes, with no scripting required.",
     images: ["/og-image.png"],
   },
   icons: {
@@ -196,7 +195,6 @@ export default async function RootLayout({
         </a>
         {children}
         <PlausibleLoader domain={PLAUSIBLE_DOMAIN} />
-        <CookieConsentBanner plausibleDomain={PLAUSIBLE_DOMAIN} />
         <Toaster />
       </PublicThemeProvider>
     </GTProvider>

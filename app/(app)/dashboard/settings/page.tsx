@@ -599,7 +599,7 @@ export default function SettingsPage() {
                     </div>
 
                     <p className="text-text-secondary text-sm mb-4">
-                      <T>IntuneGet requires the following permissions to deploy applications:</T>
+                      <T>HKS App Deployment requires the following permissions to deploy applications:</T>
                     </p>
 
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -1070,7 +1070,7 @@ function DataManagementSection() {
       <div>
         <p className="text-text-primary font-medium mb-2"><T>Auto-Refresh Interval</T></p>
         <p className="text-sm text-text-secondary mb-3">
-          <T>How often IntuneGet checks for new application data</T>
+          <T>How often HKS App Deployment checks for new application data</T>
         </p>
         <AutoRefreshSelector />
       </div>

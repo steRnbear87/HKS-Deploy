@@ -9,7 +9,7 @@ export default function DashboardAppRequestsPage() {
     <div className="max-w-5xl mx-auto">
       <PageHeader
         title={<T>App Requests</T>}
-        description={<T>Request WinGet packages you want added to IntuneGet and vote on requests from other users.</T>}
+        description={<T>Request WinGet packages you want added to HKS App Deployment and vote on requests from other users.</T>}
         gradient
         gradientColors="cyan"
       />

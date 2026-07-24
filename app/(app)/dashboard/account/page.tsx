@@ -531,7 +531,7 @@ export default function AccountPage() {
                         className="flex items-center gap-2 text-sm text-text-muted hover:text-status-error transition-colors group"
                       >
                         <LogOut className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" />
-                        <T>Sign out of IntuneGet</T>
+                        <T>Sign out of HKS App Deployment</T>
                       </button>
                     </motion.div>
                   )}

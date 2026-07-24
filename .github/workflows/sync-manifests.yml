@@ -795,6 +795,17 @@ jobs:
             console.error(`Incomplete sync: expected ${expectedShards} shard artifacts, found ${shardsFound}`);
           }
 
+          // A handful of per-app failures (rate limits, a deleted package, a
+          // malformed manifest) is normal at ~13,500 apps and already handled
+          // gracefully above (see failedApps) - it should not block today's
+          // catalog snapshot from publishing. Only a missing shard or a high
+          // failure rate (a systemic problem: Supabase down, GitHub-wide rate
+          // limiting) should fail this job and gate the snapshot job off.
+          const totalAttempted = totalSynced + totalFailed;
+          const failureRate = totalAttempted > 0 ? totalFailed / totalAttempted : 0;
+          const FAILURE_RATE_THRESHOLD = 0.5;
+          const hardFailure = !complete || failureRate > FAILURE_RATE_THRESHOLD;
+
           // Update sync status in Supabase
           const SUPABASE_URL = process.env.SUPABASE_URL;
           const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
@@ -812,9 +823,9 @@ jobs:
               body: JSON.stringify({
                 id: 'sync-manifests',
                 last_run_completed_at: new Date().toISOString(),
-                last_run_status: complete && totalFailed === 0 ? 'success' : (totalSynced > 0 ? 'partial' : 'failed'),
+                last_run_status: hardFailure ? 'failed' : (totalFailed > 0 ? 'partial' : 'success'),
                 items_processed: totalSynced,
-                error_message: totalFailed > 0 ? `${totalFailed} apps failed to sync` : null,
+                error_message: totalFailed > 0 ? `${totalFailed} apps failed to sync (${(failureRate * 100).toFixed(1)}%)` : null,
                 metadata: {
                   mode: syncMode,
                   synced: totalSynced,
@@ -822,6 +833,7 @@ jobs:
                   skipped: totalSkipped,
                   shards: shardsFound,
                   expected_shards: expectedShards,
+                  failure_rate: failureRate,
                   new_versions: allNewVersions.length
                 },
                 updated_at: new Date().toISOString()
@@ -834,7 +846,7 @@ jobs:
 
           updateStatus()
             .then(() => {
-              if (!complete || totalFailed > 0) process.exit(1);
+              if (hardFailure) process.exit(1);
             })
             .catch(err => {
               console.error('Failed to update sync status:', err);

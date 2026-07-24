@@ -4,7 +4,7 @@
  */
 
 import { createServerClient } from '@/lib/supabase';
-import type { DatabaseAdapter, PackagingJob, UploadHistoryRecord, JobStats } from './types';
+import type { DatabaseAdapter, PackagingJob, UploadHistoryRecord, JobStats, DeviceHealthSnapshot, FleetAppInventoryRow, UpdateCheckResultRecord, DeploymentDriftRecord, DeviceBiosInfoRecord, DeviceUpdateGroupRecord } from './types';
 import type { PostgrestError } from '@supabase/supabase-js';
 
 /**
@@ -505,6 +505,491 @@ export const supabaseDb: DatabaseAdapter = {
       }
 
       return data || [];
+    },
+
+    async getDistinctUserTenantPairs(): Promise<Array<{ user_id: string; intune_tenant_id: string | null }>> {
+      const supabase = createServerClient();
+
+      const { data, error } = await supabase
+        .from('upload_history')
+        .select('user_id, intune_tenant_id')
+        .not('intune_tenant_id', 'is', null);
+
+      if (isError(error)) {
+        console.error('Error fetching distinct user/tenant pairs:', error);
+        throw error;
+      }
+
+      const seen = new Set<string>();
+      const pairs: Array<{ user_id: string; intune_tenant_id: string | null }> = [];
+      for (const row of (data as unknown as Array<{ user_id: string; intune_tenant_id: string | null }>) || []) {
+        const key = `${row.user_id}:${row.intune_tenant_id}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        pairs.push(row);
+      }
+      return pairs;
+    },
+  },
+
+  deviceHealthSnapshots: {
+    async upsert(snapshot: Omit<DeviceHealthSnapshot, 'id' | 'created_at'>): Promise<DeviceHealthSnapshot> {
+      const supabase = createServerClient();
+
+      const { data, error } = await supabase
+        .from('device_health_snapshots')
+        .upsert(snapshot, { onConflict: 'tenant_id,snapshot_date' })
+        .select()
+        .single();
+
+      if (isError(error)) {
+        console.error('Error upserting device health snapshot:', error);
+        throw error;
+      }
+      if (!data) {
+        throw new Error('No data returned from device health snapshot upsert');
+      }
+
+      return data as DeviceHealthSnapshot;
+    },
+
+    async getByTenantId(tenantId: string, sinceDate: string): Promise<DeviceHealthSnapshot[]> {
+      const supabase = createServerClient();
+
+      const { data, error } = await supabase
+        .from('device_health_snapshots')
+        .select('*')
+        .eq('tenant_id', tenantId)
+        .gte('snapshot_date', sinceDate)
+        .order('snapshot_date', { ascending: true });
+
+      if (isError(error)) {
+        console.error('Error fetching device health snapshots:', error);
+        throw error;
+      }
+
+      return (data as unknown as DeviceHealthSnapshot[]) || [];
+    },
+
+    async getLatest(tenantId: string): Promise<DeviceHealthSnapshot | null> {
+      const supabase = createServerClient();
+
+      const { data, error } = await supabase
+        .from('device_health_snapshots')
+        .select('*')
+        .eq('tenant_id', tenantId)
+        .order('snapshot_date', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (isError(error)) {
+        console.error('Error fetching latest device health snapshot:', error);
+        throw error;
+      }
+
+      return (data as unknown as DeviceHealthSnapshot) || null;
+    },
+
+    async deleteOlderThan(cutoffDate: string): Promise<number> {
+      const supabase = createServerClient();
+
+      const { data, error } = await supabase
+        .from('device_health_snapshots')
+        .delete()
+        .lt('snapshot_date', cutoffDate)
+        .select('id');
+
+      if (isError(error)) {
+        console.error('Error pruning device health snapshots:', error);
+        throw error;
+      }
+
+      return (data as unknown[])?.length ?? 0;
+    },
+
+    async getKnownTenantIds(): Promise<string[]> {
+      const supabase = createServerClient();
+
+      const { data, error } = await supabase
+        .from('packaging_jobs')
+        .select('tenant_id')
+        .not('tenant_id', 'is', null);
+
+      if (isError(error)) {
+        console.error('Error fetching known tenant IDs:', error);
+        throw error;
+      }
+
+      const tenantIds = new Set<string>();
+      for (const row of (data as unknown as Array<{ tenant_id: string | null }>) || []) {
+        if (row.tenant_id) tenantIds.add(row.tenant_id);
+      }
+      return Array.from(tenantIds);
+    },
+  },
+
+  fleetAppInventory: {
+    async replaceForDate(
+      tenantId: string,
+      snapshotDate: string,
+      rows: Array<Omit<FleetAppInventoryRow, 'id' | 'created_at' | 'tenant_id' | 'snapshot_date'>>
+    ): Promise<void> {
+      const supabase = createServerClient();
+
+      const { error: deleteError } = await supabase
+        .from('fleet_app_inventory')
+        .delete()
+        .eq('tenant_id', tenantId)
+        .eq('snapshot_date', snapshotDate);
+
+      if (isError(deleteError)) {
+        console.error('Error clearing prior fleet app inventory rows:', deleteError);
+        throw deleteError;
+      }
+
+      if (rows.length === 0) return;
+
+      const { error: insertError } = await supabase.from('fleet_app_inventory').insert(
+        rows.map((row) => ({ ...row, tenant_id: tenantId, snapshot_date: snapshotDate }))
+      );
+
+      if (isError(insertError)) {
+        console.error('Error inserting fleet app inventory rows:', insertError);
+        throw insertError;
+      }
+    },
+
+    async getLatestForTenant(tenantId: string, limit: number = 20): Promise<FleetAppInventoryRow[]> {
+      const supabase = createServerClient();
+
+      const { data: latestDateRow, error: latestDateError } = await supabase
+        .from('fleet_app_inventory')
+        .select('snapshot_date')
+        .eq('tenant_id', tenantId)
+        .order('snapshot_date', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (isError(latestDateError)) {
+        console.error('Error fetching latest fleet app inventory date:', latestDateError);
+        throw latestDateError;
+      }
+      if (!latestDateRow) return [];
+
+      const { data, error } = await supabase
+        .from('fleet_app_inventory')
+        .select('*')
+        .eq('tenant_id', tenantId)
+        .eq('snapshot_date', (latestDateRow as { snapshot_date: string }).snapshot_date)
+        .order('device_count', { ascending: false })
+        .limit(limit);
+
+      if (isError(error)) {
+        console.error('Error fetching fleet app inventory:', error);
+        throw error;
+      }
+
+      return (data as unknown as FleetAppInventoryRow[]) || [];
+    },
+
+    async deleteOlderThan(cutoffDate: string): Promise<number> {
+      const supabase = createServerClient();
+
+      const { data, error } = await supabase
+        .from('fleet_app_inventory')
+        .delete()
+        .lt('snapshot_date', cutoffDate)
+        .select('id');
+
+      if (isError(error)) {
+        console.error('Error pruning fleet app inventory:', error);
+        throw error;
+      }
+
+      return (data as unknown[])?.length ?? 0;
+    },
+  },
+
+  updateCheckResults: {
+    async upsertMany(rows: Array<Omit<UpdateCheckResultRecord, 'id'>>): Promise<void> {
+      if (rows.length === 0) return;
+      const supabase = createServerClient();
+
+      const { error } = await supabase
+        .from('update_check_results')
+        .upsert(rows, { onConflict: 'user_id,tenant_id,winget_id,intune_app_id' });
+
+      if (isError(error)) {
+        console.error('Error upserting update check results:', error);
+        throw error;
+      }
+    },
+
+    async getByUserId(
+      userId: string,
+      opts: { tenantId?: string; includeDismissed?: boolean; criticalOnly?: boolean } = {}
+    ): Promise<UpdateCheckResultRecord[]> {
+      const supabase = createServerClient();
+
+      let query = supabase
+        .from('update_check_results')
+        .select('*')
+        .eq('user_id', userId)
+        .order('detected_at', { ascending: false });
+
+      if (opts.tenantId) {
+        query = query.eq('tenant_id', opts.tenantId);
+      }
+      if (!opts.includeDismissed) {
+        query = query.is('dismissed_at', null);
+      }
+      if (opts.criticalOnly) {
+        query = query.eq('is_critical', true);
+      }
+
+      const { data, error } = await query;
+
+      if (isError(error)) {
+        console.error('Error fetching update check results:', error);
+        throw error;
+      }
+
+      return (data as unknown as UpdateCheckResultRecord[]) || [];
+    },
+
+    async getByUserIds(userIds: string[]): Promise<UpdateCheckResultRecord[]> {
+      if (userIds.length === 0) return [];
+      const supabase = createServerClient();
+
+      const { data, error } = await supabase
+        .from('update_check_results')
+        .select('*')
+        .in('user_id', userIds);
+
+      if (isError(error)) {
+        console.error('Error fetching update check results:', error);
+        throw error;
+      }
+
+      return (data as unknown as UpdateCheckResultRecord[]) || [];
+    },
+
+    async setDismissed(ids: string[], userId: string, dismissed: boolean): Promise<number> {
+      if (ids.length === 0) return 0;
+      const supabase = createServerClient();
+      const now = new Date().toISOString();
+
+      const { data, error } = await supabase
+        .from('update_check_results')
+        .update({ dismissed_at: dismissed ? now : null, updated_at: now })
+        .eq('user_id', userId)
+        .in('id', ids)
+        .select('id');
+
+      if (isError(error)) {
+        console.error('Error setting dismissed state:', error);
+        throw error;
+      }
+
+      return (data as unknown[])?.length ?? 0;
+    },
+
+    async deleteByIds(ids: string[]): Promise<number> {
+      if (ids.length === 0) return 0;
+      const supabase = createServerClient();
+
+      const { data, error } = await supabase
+        .from('update_check_results')
+        .delete()
+        .in('id', ids)
+        .select('id');
+
+      if (isError(error)) {
+        console.error('Error deleting update check results:', error);
+        throw error;
+      }
+
+      return (data as unknown[])?.length ?? 0;
+    },
+
+    async deleteByUserTenantWinget(userId: string, tenantId: string, wingetId: string): Promise<number> {
+      const supabase = createServerClient();
+
+      const { data, error } = await supabase
+        .from('update_check_results')
+        .delete()
+        .eq('user_id', userId)
+        .eq('tenant_id', tenantId)
+        .eq('winget_id', wingetId)
+        .select('id');
+
+      if (isError(error)) {
+        console.error('Error deleting update check result by user/tenant/winget:', error);
+        throw error;
+      }
+
+      return (data as unknown[])?.length ?? 0;
+    },
+
+    async deleteOlderThan(cutoffDate: string): Promise<number> {
+      const supabase = createServerClient();
+
+      const { data, error } = await supabase
+        .from('update_check_results')
+        .delete()
+        .lt('detected_at', cutoffDate)
+        .select('id');
+
+      if (isError(error)) {
+        console.error('Error pruning update check results:', error);
+        throw error;
+      }
+
+      return (data as unknown[])?.length ?? 0;
+    },
+  },
+
+  deploymentDrift: {
+    async upsertMany(rows: Array<Omit<DeploymentDriftRecord, 'id'>>): Promise<void> {
+      if (rows.length === 0) return;
+      const supabase = createServerClient();
+
+      const { error } = await supabase
+        .from('deployment_drift_results')
+        .upsert(rows, { onConflict: 'user_id,tenant_id,winget_id,intune_app_id' });
+
+      if (isError(error)) {
+        console.error('Error upserting deployment drift results:', error);
+        throw error;
+      }
+    },
+
+    async getByUserId(
+      userId: string,
+      opts: { tenantId?: string } = {}
+    ): Promise<DeploymentDriftRecord[]> {
+      const supabase = createServerClient();
+
+      let query = supabase
+        .from('deployment_drift_results')
+        .select('*')
+        .eq('user_id', userId);
+
+      if (opts.tenantId) {
+        query = query.eq('tenant_id', opts.tenantId);
+      }
+
+      const { data, error } = await query;
+
+      if (isError(error)) {
+        console.error('Error fetching deployment drift results:', error);
+        throw error;
+      }
+
+      return (data as unknown as DeploymentDriftRecord[]) || [];
+    },
+
+    async deleteOlderThan(cutoffDate: string): Promise<number> {
+      const supabase = createServerClient();
+
+      const { data, error } = await supabase
+        .from('deployment_drift_results')
+        .delete()
+        .lt('scanned_at', cutoffDate)
+        .select('id');
+
+      if (isError(error)) {
+        console.error('Error pruning deployment drift results:', error);
+        throw error;
+      }
+
+      return (data as unknown[])?.length ?? 0;
+    },
+  },
+
+  deviceBiosInfo: {
+    async upsertMany(rows: Array<Omit<DeviceBiosInfoRecord, 'id'>>): Promise<void> {
+      if (rows.length === 0) return;
+      const supabase = createServerClient();
+
+      const { error } = await supabase
+        .from('device_bios_info')
+        .upsert(rows, { onConflict: 'tenant_id,device_id' });
+
+      if (isError(error)) {
+        console.error('Error upserting device BIOS info:', error);
+        throw error;
+      }
+    },
+
+    async getByTenantId(tenantId: string): Promise<DeviceBiosInfoRecord[]> {
+      const supabase = createServerClient();
+
+      const { data, error } = await supabase
+        .from('device_bios_info')
+        .select('*')
+        .eq('tenant_id', tenantId);
+
+      if (isError(error)) {
+        console.error('Error fetching device BIOS info:', error);
+        throw error;
+      }
+
+      return (data as unknown as DeviceBiosInfoRecord[]) || [];
+    },
+
+    async pruneRemoved(tenantId: string, currentDeviceIds: string[]): Promise<number> {
+      const supabase = createServerClient();
+
+      let query = supabase.from('device_bios_info').delete().eq('tenant_id', tenantId);
+      if (currentDeviceIds.length > 0) {
+        query = query.not('device_id', 'in', `(${currentDeviceIds.join(',')})`);
+      }
+      const { data, error } = await query.select('id');
+
+      if (isError(error)) {
+        console.error('Error pruning device BIOS info:', error);
+        throw error;
+      }
+
+      return (data as unknown[])?.length ?? 0;
+    },
+  },
+
+  deviceUpdateGroups: {
+    async getByDeviceId(tenantId: string, deviceId: string): Promise<DeviceUpdateGroupRecord | null> {
+      const supabase = createServerClient();
+
+      const { data, error } = await supabase
+        .from('device_update_groups')
+        .select('*')
+        .eq('tenant_id', tenantId)
+        .eq('device_id', deviceId)
+        .maybeSingle();
+
+      if (isError(error)) {
+        console.error('Error fetching device update group:', error);
+        throw error;
+      }
+
+      return (data as unknown as DeviceUpdateGroupRecord) || null;
+    },
+
+    async upsert(row: Omit<DeviceUpdateGroupRecord, 'id' | 'created_at'>): Promise<DeviceUpdateGroupRecord> {
+      const supabase = createServerClient();
+
+      const { data, error } = await supabase
+        .from('device_update_groups')
+        .upsert(row, { onConflict: 'tenant_id,device_id' })
+        .select('*')
+        .single();
+
+      if (isError(error)) {
+        console.error('Error upserting device update group:', error);
+        throw error;
+      }
+
+      return data as unknown as DeviceUpdateGroupRecord;
     },
   },
 };

@@ -4,7 +4,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { createServerClient } from '@/lib/supabase';
+import { createServerClient, isSupabaseConfigured } from '@/lib/supabase';
 import { parseAccessToken } from '@/lib/auth-utils';
 
 /**
@@ -40,6 +40,12 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // In-app notifications are backed by a Supabase-only table with no
+    // SQLite equivalent; there is nothing to mark read, so no-op success.
+    if (!isSupabaseConfigured()) {
+      return NextResponse.json({ success: true, marked_count: 0 });
+    }
+
     const supabase = createServerClient();
 
     // Mark notifications as read, but only if they belong to the user
@@ -61,7 +67,8 @@ export async function POST(request: NextRequest) {
       success: true,
       marked_count: notification_ids.length,
     });
-  } catch {
+  } catch (error) {
+    console.error('[POST /api/notifications/mark-read] Unhandled error:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }

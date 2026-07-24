@@ -457,6 +457,31 @@ export async function getEntraIDGroups(
 }
 
 /**
+ * Resolves a batch of group ids to their display names in one call - used to
+ * turn raw assignment target groupIds (all Graph ever returns) into
+ * human-readable names for the Windows Update policy tabs.
+ */
+export async function getGroupsByIds(accessToken: string, groupIds: string[]): Promise<EntraIDGroup[]> {
+  const uniqueIds = Array.from(new Set(groupIds)).filter(Boolean);
+  if (uniqueIds.length === 0) return [];
+
+  const url = new URL(`${GRAPH_API_BASE}/groups`);
+  url.searchParams.set('$filter', `id in (${uniqueIds.map((id) => `'${id}'`).join(',')})`);
+  url.searchParams.set('$select', 'id,displayName,description,securityEnabled');
+
+  const response = await fetch(url.toString(), {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to resolve group names');
+  }
+
+  const data: GraphApiResponse<EntraIDGroup> = await response.json();
+  return data.value || [];
+}
+
+/**
  * Fetch every page of a Graph collection by following @odata.nextLink.
  * Graph paginates list endpoints; reading only the first page silently
  * truncates results (e.g. a category/filter dropdown missing entries).

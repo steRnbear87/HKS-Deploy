@@ -4,8 +4,17 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { createServerClient } from '@/lib/supabase';
+import { getDatabase } from '@/lib/db';
 import { parseAccessToken } from '@/lib/auth-utils';
+
+// Approximate "all" for analytics aggregation on self-hosted SQLite installs.
+const ANALYTICS_SCAN_LIMIT = 2000;
+
+// 'deployed' is the final success status (uploaded to Intune); 'completed' is
+// used for packaging-only completion (less common, mirrors analytics/stats).
+function isSuccess(status: string): boolean {
+  return status === 'deployed' || status === 'completed';
+}
 
 interface DailyDeployment {
   date: string;
@@ -52,39 +61,12 @@ export async function GET(request: NextRequest) {
       now.getUTCDate() - days
     ));
 
-    const supabase = createServerClient();
-
-    // Define the shape of jobs returned from the query
-    interface PackagingJobAnalytics {
-      id: string;
-      winget_id: string;
-      display_name: string;
-      publisher: string | null;
-      status: string;
-      error_message: string | null;
-      created_at: string;
-      completed_at: string | null;
-    }
-
-    // Get all jobs in date range
-    const { data: jobs, error: jobsError } = await supabase
-      .from('packaging_jobs')
-      .select('id, winget_id, display_name, publisher, status, error_message, created_at, completed_at')
-      .eq('user_id', user.userId)
-      .gte('created_at', startDate.toISOString())
-      .order('created_at', { ascending: false });
-
-    if (jobsError) {
-      return NextResponse.json(
-        { error: 'Failed to fetch analytics data' },
-        { status: 500 }
-      );
-    }
-
-    const allJobs = (jobs || []) as PackagingJobAnalytics[];
+    const db = getDatabase();
+    const allJobs = (await db.jobs.getByUserId(user.userId, ANALYTICS_SCAN_LIMIT))
+      .filter((j) => new Date(j.created_at) >= startDate);
 
     // Calculate success rate
-    const completedJobs = allJobs.filter((j) => j.status === 'completed').length;
+    const completedJobs = allJobs.filter((j) => isSuccess(j.status)).length;
     const failedJobs = allJobs.filter((j) => j.status === 'failed').length;
     const totalFinished = completedJobs + failedJobs;
     const successRate = totalFinished > 0 ? Math.round((completedJobs / totalFinished) * 100) : 0;
@@ -108,7 +90,7 @@ export async function GET(request: NextRequest) {
 
       const existing = dailyMap.get(date);
       if (existing) {
-        if (job.status === 'completed') {
+        if (isSuccess(job.status)) {
           existing.completed++;
         } else if (job.status === 'failed') {
           existing.failed++;
@@ -128,7 +110,7 @@ export async function GET(request: NextRequest) {
     const appCounts = new Map<string, { displayName: string; publisher: string; count: number }>();
 
     allJobs
-      .filter((j) => j.status === 'completed')
+      .filter((j) => isSuccess(j.status))
       .forEach((job) => {
         const existing = appCounts.get(job.winget_id);
         if (existing) {
@@ -184,7 +166,8 @@ export async function GET(request: NextRequest) {
         days,
       },
     });
-  } catch {
+  } catch (error) {
+    console.error('[GET /api/analytics] Unhandled error:', error);
     return NextResponse.json(
       { error: 'Failed to fetch analytics' },
       { status: 500 }

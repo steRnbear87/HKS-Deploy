@@ -71,6 +71,7 @@ vi.mock('@/lib/installer-preflight', async (importOriginal) => {
 
 vi.mock('@/lib/supabase', () => ({
   createServerClient: vi.fn(),
+  isSupabaseConfigured: vi.fn(() => true),
 }));
 
 vi.mock('@/lib/msp/tenant-resolution', () => ({

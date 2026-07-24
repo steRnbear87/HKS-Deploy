@@ -103,7 +103,7 @@ export async function GET(request: NextRequest) {
           iconPath: p.icon_path,
           popularityRank: p.popularity_rank,
           installerType: p.installer_type,
-          appSource: p.app_source === 'store' ? 'store' : 'win32',
+          appSource: p.app_source === 'store' ? 'store' : p.app_source === 'chocolatey' ? 'chocolatey' : 'win32',
           packageIdentifier: p.store_package_id || undefined,
         })),
         source: 'curated',

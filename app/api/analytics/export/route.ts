@@ -4,8 +4,11 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { createServerClient } from '@/lib/supabase';
+import { getDatabase } from '@/lib/db';
 import { parseAccessToken } from '@/lib/auth-utils';
+
+// Approximate "all" for export on self-hosted SQLite installs.
+const EXPORT_SCAN_LIMIT = 2000;
 
 export async function GET(request: NextRequest) {
   try {
@@ -31,51 +34,9 @@ export async function GET(request: NextRequest) {
       now.getUTCDate() - days
     ));
 
-    const supabase = createServerClient();
-
-    // Define the shape of jobs returned from the query
-    interface PackagingJobExport {
-      id: string;
-      winget_id: string;
-      display_name: string;
-      publisher: string | null;
-      version: string;
-      architecture: string | null;
-      installer_type: string;
-      status: string;
-      error_message: string | null;
-      intune_app_id: string | null;
-      created_at: string;
-      completed_at: string | null;
-    }
-
-    // Get all jobs in date range
-    const { data: jobs, error: jobsError } = await supabase
-      .from('packaging_jobs')
-      .select(`
-        id,
-        winget_id,
-        display_name,
-        publisher,
-        version,
-        architecture,
-        installer_type,
-        status,
-        error_message,
-        intune_app_id,
-        created_at,
-        completed_at
-      `)
-      .eq('user_id', user.userId)
-      .gte('created_at', startDate.toISOString())
-      .order('created_at', { ascending: false });
-
-    if (jobsError) {
-      return NextResponse.json(
-        { error: 'Failed to fetch data for export' },
-        { status: 500 }
-      );
-    }
+    const db = getDatabase();
+    const allJobs = (await db.jobs.getByUserId(user.userId, EXPORT_SCAN_LIMIT))
+      .filter((j) => new Date(j.created_at) >= startDate);
 
     // Build CSV
     const headers = [
@@ -93,7 +54,6 @@ export async function GET(request: NextRequest) {
       'Completed At',
     ];
 
-    const allJobs = (jobs || []) as PackagingJobExport[];
     const rows = allJobs.map((job) => [
       job.id,
       job.winget_id,
@@ -135,7 +95,8 @@ export async function GET(request: NextRequest) {
         'Content-Disposition': `attachment; filename="${filename}"`,
       },
     });
-  } catch {
+  } catch (error) {
+    console.error('[GET /api/analytics/export] Unhandled error:', error);
     return NextResponse.json(
       { error: 'Failed to export data' },
       { status: 500 }

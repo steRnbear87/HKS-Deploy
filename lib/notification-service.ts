@@ -3,7 +3,7 @@
  * Utility for creating and managing in-app notifications
  */
 
-import { createServerClient } from '@/lib/supabase';
+import { createServerClient, isSupabaseConfigured } from '@/lib/supabase';
 
 // ============================================
 // Types
@@ -50,6 +50,10 @@ export interface Notification {
  * Create a notification for a user
  */
 export async function createNotification(input: NotificationInput): Promise<void> {
+  // In-app notifications are backed by a Supabase-only table with no SQLite
+  // equivalent; self-hosted installs just skip notification creation.
+  if (!isSupabaseConfigured()) return;
+
   try {
     const supabase = createServerClient();
 
@@ -78,6 +82,8 @@ export async function createNotification(input: NotificationInput): Promise<void
 export async function createBulkNotifications(
   notifications: NotificationInput[]
 ): Promise<void> {
+  if (!isSupabaseConfigured()) return;
+
   try {
     const supabase = createServerClient();
 
@@ -260,6 +266,10 @@ export async function getUserNotifications(
   limit: number = 20,
   unreadOnly: boolean = false
 ): Promise<NotificationQueryResult> {
+  if (!isSupabaseConfigured()) {
+    return { notifications: [], unread_count: 0 };
+  }
+
   const supabase = createServerClient();
 
   let query = supabase
@@ -299,6 +309,8 @@ export async function getUserNotifications(
 export async function markNotificationsAsRead(
   notificationIds: string[]
 ): Promise<void> {
+  if (!isSupabaseConfigured()) return;
+
   const supabase = createServerClient();
 
   const { error } = await supabase
@@ -315,6 +327,8 @@ export async function markNotificationsAsRead(
  * Mark all notifications as read for a user
  */
 export async function markAllNotificationsAsRead(userId: string): Promise<void> {
+  if (!isSupabaseConfigured()) return;
+
   const supabase = createServerClient();
 
   const { error } = await supabase

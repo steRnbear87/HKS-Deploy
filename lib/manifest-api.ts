@@ -585,6 +585,7 @@ function getDefaultSilentSwitch(installerType: WingetInstallerType): string {
     zip: '',
     pwa: '',
     portable: '',
+    chocolatey: '',
   };
 
   return defaults[installerType] || '';

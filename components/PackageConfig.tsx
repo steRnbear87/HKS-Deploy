@@ -67,7 +67,7 @@ import { useFocusTrap } from '@/hooks/use-focus-trap';
 import { generateDetectionRules, generateInstallCommand, generateUninstallCommand } from '@/lib/detection-rules';
 import { INTUNE_APP_SOURCE_MARKER } from '@/lib/intune-description';
 
-// Strip the auto-appended "Source: IntuneGet.com" marker so the description
+// Strip the auto-appended "Source: HKS App Deployment" marker so the description
 // editor shows only the human-authored text. The marker is re-appended at
 // deploy time by buildIntuneAppDescription, which is idempotent.
 function stripSourceMarker(value: string): string {
@@ -76,7 +76,12 @@ function stripSourceMarker(value: string): string {
 }
 import { useLocaleVariants, usePackageManifest } from '@/hooks/use-packages';
 import { countryCodeToFlag, cleanPackageName } from '@/lib/locale-utils';
-import { Store } from 'lucide-react';
+import { Store, Package as PackageIcon } from 'lucide-react';
+import {
+  buildChocolateyInstallCommand,
+  buildChocolateyUninstallCommand,
+  CHOCOLATEY_BOOTSTRAP_URL,
+} from '@/lib/chocolatey-app';
 
 interface PackageConfigProps {
   package: NormalizedPackage;
@@ -106,6 +111,11 @@ type ConfigSection =
 
 export function PackageConfig({ package: pkg, installers, versions = [], onClose, isDeployed = false, deployedConfig, intuneAppId, storeManifest }: PackageConfigProps) {
   const isStoreApp = pkg.appSource === 'store';
+  // Chocolatey packages go through the full win32/PSADT pipeline (unlike Store)
+  // but have no winget manifest to select an installer/architecture from - the
+  // catalog row (name/publisher/latest_version) is all that's needed, and the
+  // install command is a fixed choco bootstrap+install script (lib/chocolatey-app.ts).
+  const isChocolateyApp = pkg.appSource === 'chocolatey';
 
   // Store app install experience state
   const [storeInstallExperience, setStoreInstallExperience] = useState<'user' | 'system'>('user');
@@ -177,6 +187,15 @@ export function PackageConfig({ package: pkg, installers, versions = [], onClose
     if (win32Config?.psadtConfig) {
       return win32Config.psadtConfig;
     }
+    if (isChocolateyApp) {
+      // Seed the install/uninstall override so the Advanced section shows the
+      // real choco bootstrap+install command (still user-editable from there).
+      return {
+        ...DEFAULT_PSADT_CONFIG,
+        installCommand: buildChocolateyInstallCommand(pkg.id, selectedVersion),
+        uninstallCommand: buildChocolateyUninstallCommand(pkg.id),
+      };
+    }
     return {
       ...DEFAULT_PSADT_CONFIG,
       processesToClose: getDefaultProcessesToClose(pkg.name, installers[0]?.type || 'exe'),
@@ -185,7 +204,7 @@ export function PackageConfig({ package: pkg, installers, versions = [], onClose
 
   // Editable Intune app description (#117). Defaults to the package description;
   // left blank, it falls back to the package default at deploy time. The
-  // "Source: IntuneGet.com" marker is appended later by buildIntuneAppDescription.
+  // "Source: HKS App Deployment" marker is appended later by buildIntuneAppDescription.
   const [description, setDescription] = useState<string>(
     () => stripSourceMarker(deployedConfig?.description ?? pkg.description ?? '')
   );
@@ -263,7 +282,7 @@ export function PackageConfig({ package: pkg, installers, versions = [], onClose
   // user selects a different version we must re-fetch so the installer URL/SHA
   // (which flow straight into the cart item) match the chosen version rather than
   // silently deploying the latest binary under an older version label.
-  const isNonDefaultVersion = !isStoreApp && !!selectedVersion && selectedVersion !== pkg.version;
+  const isNonDefaultVersion = !isStoreApp && !isChocolateyApp && !!selectedVersion && selectedVersion !== pkg.version;
   const { data: versionManifest, isFetching: isFetchingVersionInstallers } = usePackageManifest(
     pkg.id,
     selectedVersion,
@@ -282,9 +301,11 @@ export function PackageConfig({ package: pkg, installers, versions = [], onClose
   const hasMultipleVersions = availableVersions.length > 1;
   const inCart = isStoreApp
     ? isInCart(pkg.packageIdentifier || pkg.id, selectedVersion, undefined, storeInstallExperience)
-    : selectedInstaller
-      ? isInCart(effectiveWingetId, selectedVersion, selectedInstaller.architecture, selectedScope)
-      : false;
+    : isChocolateyApp
+      ? isInCart(pkg.id, selectedVersion, 'x64', 'machine')
+      : selectedInstaller
+        ? isInCart(effectiveWingetId, selectedVersion, selectedInstaller.architecture, selectedScope)
+        : false;
 
   const modalRef = useFocusTrap<HTMLDivElement>();
 
@@ -356,9 +377,20 @@ export function PackageConfig({ package: pkg, installers, versions = [], onClose
   }, [effectiveInstallers, selectedArch]);
 
   // Generate detection rules when installer, version, locale, or marker path changes
-  // Pass effectiveWingetId so locale variant packages get correct detection markers
+  // Pass effectiveWingetId so locale variant packages get correct detection markers.
+  // Chocolatey packages have no real installer - a synthetic installer.type:
+  // 'chocolatey' drives the same registry-marker path (see lib/chocolatey-app.ts).
   useEffect(() => {
-    if (selectedInstaller) {
+    if (isChocolateyApp) {
+      const rules = generateDetectionRules(
+        { architecture: 'x64', url: '', sha256: '', type: 'chocolatey', scope: 'machine' },
+        pkg.name,
+        pkg.id,
+        selectedVersion,
+        config.registryMarkerPath
+      );
+      setConfig((prev) => ({ ...prev, detectionRules: rules }));
+    } else if (selectedInstaller) {
       const rules = generateDetectionRules(
         selectedInstaller,
         pkg.name,
@@ -371,21 +403,49 @@ export function PackageConfig({ package: pkg, installers, versions = [], onClose
         detectionRules: rules,
       }));
     }
-  }, [selectedInstaller, pkg.name, effectiveWingetId, selectedVersion, config.registryMarkerPath]);
+  }, [isChocolateyApp, selectedInstaller, pkg.name, pkg.id, effectiveWingetId, selectedVersion, config.registryMarkerPath]);
 
   const handleAddToCart = async () => {
     if (addedToCartSuccess) return;
 
-    // Store apps don't need an installer
-    if (!isStoreApp && !selectedInstaller) return;
+    // Store and Chocolatey apps don't need an installer
+    if (!isStoreApp && !isChocolateyApp && !selectedInstaller) return;
     // Don't add while installers for a newly-selected version are still loading,
     // otherwise the cart could capture the previous version's installer.
-    if (!isStoreApp && isFetchingVersionInstallers) return;
-    if (!isStoreApp && inCart) return;
+    if (!isStoreApp && !isChocolateyApp && isFetchingVersionInstallers) return;
+    if (inCart) return;
 
     setIsAddingToCart(true);
     try {
-      if (isStoreApp) {
+      if (isChocolateyApp) {
+        // Respect any edits made in the Advanced section; config.installCommand/
+        // uninstallCommand were seeded with the real choco bootstrap+install
+        // script when this modal opened (see the config useState initializer).
+        addItem({
+          appSource: 'win32',
+          sourceType: 'chocolatey',
+          wingetId: pkg.id,
+          displayName: pkg.name,
+          publisher: pkg.publisher,
+          description: description.trim() || pkg.description,
+          version: selectedVersion,
+          architecture: 'x64',
+          installScope: 'machine',
+          installerType: 'chocolatey',
+          installerUrl: CHOCOLATEY_BOOTSTRAP_URL,
+          installerSha256: '',
+          installCommand: config.installCommand || buildChocolateyInstallCommand(pkg.id, selectedVersion),
+          uninstallCommand: config.uninstallCommand || buildChocolateyUninstallCommand(pkg.id),
+          detectionRules: config.detectionRules,
+          psadtConfig: config,
+          assignments: assignments.length > 0 ? assignments : undefined,
+          categories: categories.length > 0 ? categories : undefined,
+          espProfiles: espProfiles.length > 0 ? espProfiles : undefined,
+          relationships: relationships.length > 0 ? relationships : undefined,
+          iconPath: pkg.iconPath,
+          ...(isDeployed ? { forceCreate: true } : {}),
+        });
+      } else if (isStoreApp) {
         // Store app: simplified cart item
         // Use enriched data from Store manifest when available
         const storeItem = createStoreCartItem(
@@ -600,6 +660,21 @@ export function PackageConfig({ package: pkg, installers, versions = [], onClose
               </div>
             )}
 
+            {/* Chocolatey badge */}
+            {isChocolateyApp && (
+              <div className="flex items-center gap-2 px-3 py-2 bg-blue-500/10 border border-blue-500/20 rounded-lg">
+                <PackageIcon className="w-4 h-4 text-blue-400" />
+                <span className="text-sm font-medium text-blue-300">Chocolatey Package</span>
+                <span className="text-xs text-blue-400/70 ml-auto font-mono">v{selectedVersion} &middot; {pkg.id}</span>
+              </div>
+            )}
+            {isChocolateyApp && (
+              <p className="text-xs text-text-muted -mt-3">
+                Installed via Chocolatey (bootstraps choco.exe if needed). The target device needs
+                internet access to community.chocolatey.org during install.
+              </p>
+            )}
+
             {/* Store App: Install Experience */}
             {isStoreApp && (
               <div>
@@ -663,8 +738,9 @@ export function PackageConfig({ package: pkg, installers, versions = [], onClose
               </div>
             )}
 
-            {/* Win32 App: Version & Architecture Selection */}
-            {!isStoreApp && (<>
+            {/* Win32 App: Version & Architecture Selection - not applicable to
+                Chocolatey (single pinned version, no architecture variants) */}
+            {!isStoreApp && !isChocolateyApp && (<>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               {/* Version */}
               <div>
@@ -2060,7 +2136,7 @@ export function PackageConfig({ package: pkg, installers, versions = [], onClose
                 </Button>
                 <Button
                   onClick={handleAddToCart}
-                  disabled={(!isStoreApp && (!selectedInstaller || isFetchingVersionInstallers)) || inCart || isAddingToCart || addedToCartSuccess}
+                  disabled={(!isStoreApp && !isChocolateyApp && (!selectedInstaller || isFetchingVersionInstallers)) || inCart || isAddingToCart || addedToCartSuccess}
                   variant="outline"
                   className={cn(
                     'py-5 text-base font-medium',
@@ -2085,7 +2161,7 @@ export function PackageConfig({ package: pkg, installers, versions = [], onClose
           ) : (
             <Button
               onClick={handleAddToCart}
-              disabled={(!isStoreApp && (!selectedInstaller || isFetchingVersionInstallers)) || inCart || isAddingToCart || addedToCartSuccess}
+              disabled={(!isStoreApp && !isChocolateyApp && (!selectedInstaller || isFetchingVersionInstallers)) || inCart || isAddingToCart || addedToCartSuccess}
               className={cn(
                 'w-full py-5 text-base font-medium',
                 inCart || addedToCartSuccess

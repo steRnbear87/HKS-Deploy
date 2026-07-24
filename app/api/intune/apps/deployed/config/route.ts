@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createServerClient } from '@/lib/supabase';
+import { createServerClient, isSupabaseConfigured } from '@/lib/supabase';
 import { parseAccessToken } from '@/lib/auth-utils';
 import { resolveTargetTenantId } from '@/lib/msp/tenant-resolution';
+import { getDatabase } from '@/lib/db';
 
 export async function GET(request: NextRequest) {
   try {
@@ -23,33 +24,34 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const supabase = createServerClient();
-    const mspTenantId = request.headers.get('X-MSP-Tenant-Id');
+    // MSP tenant resolution is a Supabase-only (hosted) concern; self-hosted
+    // SQLite installs use the signed-in user's own tenant.
+    let tenantId = user.tenantId;
+    if (isSupabaseConfigured()) {
+      const supabase = createServerClient();
+      const mspTenantId = request.headers.get('X-MSP-Tenant-Id');
 
-    const tenantResolution = await resolveTargetTenantId({
-      supabase,
-      userId: user.userId,
-      tokenTenantId: user.tenantId,
-      requestedTenantId: mspTenantId,
-    });
+      const tenantResolution = await resolveTargetTenantId({
+        supabase,
+        userId: user.userId,
+        tokenTenantId: user.tenantId,
+        requestedTenantId: mspTenantId,
+      });
 
-    if (tenantResolution.errorResponse) {
-      return tenantResolution.errorResponse;
+      if (tenantResolution.errorResponse) {
+        return tenantResolution.errorResponse;
+      }
+      tenantId = tenantResolution.tenantId;
     }
 
     // Get the most recent successfully deployed job's package_config
-    const { data, error } = await supabase
-      .from('packaging_jobs')
-      .select('package_config, completed_at, intune_app_id')
-      .eq('user_id', user.userId)
-      .eq('tenant_id', tenantResolution.tenantId)
-      .eq('winget_id', wingetId)
-      .eq('status', 'deployed')
-      .order('completed_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
+    const db = getDatabase();
+    const userJobs = await db.jobs.getByUserId(user.userId, 200);
+    const latestJob = userJobs
+      .filter((j) => j.tenant_id === tenantId && j.winget_id === wingetId && j.status === 'deployed')
+      .sort((a, b) => new Date(b.completed_at || 0).getTime() - new Date(a.completed_at || 0).getTime())[0];
 
-    if (error || !data) {
+    if (!latestJob) {
       return NextResponse.json({
         config: null,
         deployedAt: null,
@@ -58,11 +60,12 @@ export async function GET(request: NextRequest) {
     }
 
     return NextResponse.json({
-      config: data.package_config,
-      deployedAt: data.completed_at,
-      intuneAppId: data.intune_app_id || null,
+      config: latestJob.package_config,
+      deployedAt: latestJob.completed_at,
+      intuneAppId: latestJob.intune_app_id || null,
     });
-  } catch {
+  } catch (error) {
+    console.error('[GET /api/intune/apps/deployed/config] Unhandled error:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }

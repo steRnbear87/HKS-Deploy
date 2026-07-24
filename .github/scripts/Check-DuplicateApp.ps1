@@ -84,9 +84,9 @@ try {
 
     Write-Host "Found $($nameMatches.Count) app(s) matching name '$displayName'"
 
-    # Check for exact match: name + IntuneGet fingerprint in description.
+    # Check for exact match: name + HKS App Deployment fingerprint in description.
     # Apps deployed with a default description carry "Winget: <id>"; apps
-    # deployed with a catalog description carry only "Source: IntuneGet.com".
+    # deployed with a catalog description carry only "Source: HKS App Deployment".
     # A marker naming a DIFFERENT winget id is a different app, not a duplicate.
     $exactMatch = $null
     foreach ($app in $nameMatches) {
@@ -96,7 +96,7 @@ try {
             if ($wingetId -and $Matches[1] -ieq $wingetId) {
                 $isFingerprintMatch = $true
             }
-        } elseif ($app.description -match [regex]::Escape("Source: IntuneGet.com")) {
+        } elseif ($app.description -match [regex]::Escape("Source: HKS App Deployment")) {
             $isFingerprintMatch = $true
         }
 
@@ -120,7 +120,7 @@ try {
     }
 
     if ($exactMatch) {
-        # Exact match found (same name + same winget ID = deployed by IntuneGet)
+        # Exact match found (same name + same winget ID = deployed by HKS App Deployment)
         $appId = $exactMatch.id
         $appUrl = "https://intune.microsoft.com/#view/Microsoft_Intune_Apps/SettingsMenu/~/0/appId/$appId"
         $existingVersion = $exactMatch.displayVersion
@@ -154,8 +154,8 @@ try {
         exit 0
     }
     else {
-        # Partial match: same name but different source (not deployed by IntuneGet)
-        Write-Host "::warning::App with name '$displayName' exists but was not deployed by IntuneGet - proceeding with deployment"
+        # Partial match: same name but different source (not deployed by HKS App Deployment)
+        Write-Host "::warning::App with name '$displayName' exists but was not deployed by HKS App Deployment - proceeding with deployment"
         echo "DUPLICATE_FOUND=false" >> $env:GITHUB_ENV
         echo "DUPLICATE_MATCH_TYPE=partial" >> $env:GITHUB_ENV
         exit 0

@@ -136,7 +136,7 @@ interface CartItemBase {
   id: string; // Unique cart item ID
   wingetId: string;
   // How the item was added to the cart; absent = winget catalog
-  sourceType?: 'winget' | 'custom';
+  sourceType?: 'winget' | 'custom' | 'chocolatey';
   displayName: string;
   publisher: string;
   description?: string;

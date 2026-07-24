@@ -63,19 +63,27 @@ function getManagedIdentityCredential(): ManagedIdentityCredential {
 }
 
 /**
- * Acquire an app-only Microsoft Graph access token for `tenantId`.
+ * Acquire an app-only access token for `tenantId`, scoped to `scope`
+ * (defaults to Microsoft Graph). Same client-credentials flow and app
+ * registration; a different `scope` (e.g. `https://api.loganalytics.io/.default`)
+ * requests a token for a different resource/audience - used by the Log
+ * Analytics client for Windows Update for Business reports, which requires
+ * an Azure RBAC role grant on the workspace rather than a Graph permission.
  * In managed-identity mode the tenant is the managed identity's home tenant and
  * `tenantId` is ignored.
  */
-export async function acquireAppOnlyToken(tenantId: string): Promise<AppTokenResult> {
+export async function acquireAppOnlyToken(
+  tenantId: string,
+  scope: string = GRAPH_DEFAULT_SCOPE
+): Promise<AppTokenResult> {
   return isManagedIdentityMode()
-    ? acquireViaManagedIdentity()
-    : acquireViaClientSecret(tenantId);
+    ? acquireViaManagedIdentity(scope)
+    : acquireViaClientSecret(tenantId, scope);
 }
 
-async function acquireViaManagedIdentity(): Promise<AppTokenResult> {
+async function acquireViaManagedIdentity(scope: string): Promise<AppTokenResult> {
   try {
-    const token = await getManagedIdentityCredential().getToken(GRAPH_DEFAULT_SCOPE);
+    const token = await getManagedIdentityCredential().getToken(scope);
     if (!token?.token) {
       return { ok: false, error: 'missing_credentials' };
     }
@@ -96,7 +104,7 @@ async function acquireViaManagedIdentity(): Promise<AppTokenResult> {
   }
 }
 
-async function acquireViaClientSecret(tenantId: string): Promise<AppTokenResult> {
+async function acquireViaClientSecret(tenantId: string, scope: string): Promise<AppTokenResult> {
   const clientId = resolveClientId();
   const clientSecret = process.env.AZURE_CLIENT_SECRET || process.env.AZURE_AD_CLIENT_SECRET;
   if (!clientId || !clientSecret) {
@@ -113,7 +121,7 @@ async function acquireViaClientSecret(tenantId: string): Promise<AppTokenResult>
         body: new URLSearchParams({
           client_id: clientId,
           client_secret: clientSecret,
-          scope: GRAPH_DEFAULT_SCOPE,
+          scope,
           grant_type: 'client_credentials',
         }).toString(),
       }

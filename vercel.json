@@ -19,6 +19,18 @@
     {
       "path": "/api/cron/cleanup-stale-jobs",
       "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/device-health-snapshot",
+      "schedule": "0 5 * * *"
+    },
+    {
+      "path": "/api/cron/app-inventory-snapshot",
+      "schedule": "0 6 * * *"
+    },
+    {
+      "path": "/api/cron/device-bios-snapshot",
+      "schedule": "*/15 * * * *"
     }
   ]
 }

@@ -185,9 +185,9 @@ export interface PSADTConfig {
   detectionRules: DetectionRule[];
 
   // Registry marker root: subpath under the hive (HKLM/HKCU) where the
-  // IntuneGet detection marker key is written, without a hive prefix.
+  // HKS App Deployment detection marker key is written, without a hive prefix.
   // Example: 'SOFTWARE\\Contoso\\Apps'. Absent/empty means the default
-  // 'SOFTWARE\\IntuneGet\\Apps' (see lib/registry-marker.ts).
+  // 'SOFTWARE\\HKS\\Apps' (see lib/registry-marker.ts).
   registryMarkerPath?: string;
 
   // Install commands (can override defaults)

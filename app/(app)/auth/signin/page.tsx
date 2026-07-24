@@ -2,9 +2,8 @@
 
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useEffect, useState, Suspense, useCallback } from 'react';
-import Link from 'next/link';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
-import { Shield, Loader2, Package, ChevronDown, Copy, Check, AlertTriangle, Users, Boxes, ArrowLeft } from 'lucide-react';
+import { Shield, Loader2, Package, ChevronDown, Copy, Check, AlertTriangle, Users, Boxes } from 'lucide-react';
 import dynamic from 'next/dynamic';
 import { T, Var } from "gt-next";
 import { VerificationSceneFallback } from '@/components/auth/verification-scene/VerificationSceneFallback';
@@ -319,8 +318,8 @@ function SignInContent() {
                 </div>
               </div>
               <div>
-                <h1 className="text-2xl font-bold text-text-primary"><T>IntuneGet</T></h1>
-                <p className="text-sm font-medium text-text-muted"><T>Winget for Intune</T></p>
+                <h1 className="text-2xl font-bold text-text-primary"><T>HKS App Deployment</T></h1>
+                <p className="text-sm font-medium text-text-muted"><T>Deploy Apps to Microsoft Intune</T></p>
               </div>
             </div>
           </FadeIn>
@@ -461,8 +460,8 @@ function SignInContent() {
                 <Package className="h-8 w-8 text-white" />
               </div>
             </div>
-            <h1 className="text-2xl font-bold text-text-primary"><T>IntuneGet</T></h1>
-            <p className="text-sm font-medium text-text-muted"><T>Winget for Intune</T></p>
+            <h1 className="text-2xl font-bold text-text-primary"><T>HKS App Deployment</T></h1>
+            <p className="text-sm font-medium text-text-muted"><T>Deploy Apps to Microsoft Intune</T></p>
             {/* Mobile trust strip */}
             <div className="mt-4 flex w-full items-center justify-center gap-2 text-xs font-medium text-text-secondary">
               <span className="flex items-center gap-1.5 rounded-full border border-accent-cyan/20 bg-accent-cyan/10 px-2.5 py-1">
@@ -581,7 +580,7 @@ function SignInContent() {
                           <div className="text-sm">
                             <p className="font-semibold text-amber-600"><T>Global Admin Required</T></p>
                             <p className="mt-1 text-amber-600/80">
-                              <T>Only Global Administrators can grant the permissions IntuneGet needs.</T>
+                              <T>Only Global Administrators can grant the permissions HKS App Deployment needs.</T>
                             </p>
                           </div>
                         </div>
@@ -628,23 +627,6 @@ function SignInContent() {
               </div>
             </div>
           </motion.div>
-
-          {/* Footer links */}
-          <FadeIn animateOnMount delay={0.15}>
-            <div className="mt-6 flex items-center justify-center gap-2 text-sm font-medium text-text-muted">
-              <Link href="/" className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 transition-colors hover:bg-overlay/[0.04] hover:text-text-primary">
-                <ArrowLeft className="h-3.5 w-3.5" />
-                <T>Back to home</T>
-              </Link>
-              <span className="h-4 w-px bg-overlay/15" />
-              <Link
-                href="/docs/docker"
-                className="rounded-full px-3 py-1.5 transition-colors hover:bg-overlay/[0.04] hover:text-text-primary"
-              >
-                <T>Self-host guide</T>
-              </Link>
-            </div>
-          </FadeIn>
         </div>
       </div>
     </div>

@@ -12,6 +12,7 @@ import {
   TopAppsChart,
   RecentFailuresTable,
   DateRangePicker,
+  InstallStatusPanel,
 } from '@/components/reports';
 import { PageHeader, AnimatedStatCard, StatCardGrid, SkeletonGrid, AnimatedEmptyState } from '@/components/dashboard';
 
@@ -236,6 +237,25 @@ export default function ReportsPage() {
       >
         <h2 className="text-lg font-semibold text-text-primary mb-4"><T>Recent Failures</T></h2>
         <RecentFailuresTable data={data?.recentFailures || []} />
+      </motion.div>
+
+      {/* Live Intune Install Status */}
+      <motion.div
+        variants={itemVariants}
+        initial="hidden"
+        animate="visible"
+        className="glass-light border border-overlay/5 rounded-xl p-6 hover:border-accent-cyan/20 transition-colors"
+      >
+        <h2 className="text-lg font-semibold text-text-primary mb-1">
+          <T>Live Intune Install Status</T>
+        </h2>
+        <p className="text-sm text-text-muted mb-4">
+          <T>
+            Per-app device install counts pulled straight from Microsoft Intune, separate from
+            the deployment stats above.
+          </T>
+        </p>
+        <InstallStatusPanel />
       </motion.div>
     </div>
   );

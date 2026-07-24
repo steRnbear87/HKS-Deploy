@@ -331,7 +331,7 @@ async function startBatchItems(batchId: string): Promise<number> {
         displayName: batch.display_name,
         description: buildIntuneAppDescription({
           description: appDescription,
-          fallback: `Deployed via IntuneGet from Winget: ${batch.winget_id}`,
+          fallback: `Deployed via HKS App Deployment from Winget: ${batch.winget_id}`,
         }),
         publisher: '',
         version: batch.version,

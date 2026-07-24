@@ -40,7 +40,7 @@ export interface InstallerPreflightRequest {
   installerSha256: string;
   installerType?: string;
   installScope?: 'machine' | 'user';
-  sourceType?: 'winget' | 'custom';
+  sourceType?: 'winget' | 'custom' | 'chocolatey';
 }
 
 export interface InstallerPreflightResult {
@@ -363,7 +363,9 @@ async function enforceInternal(input: InstallerPreflightRequest): Promise<Instal
 export async function enforceInstallerPreflight(
   input: InstallerPreflightRequest,
 ): Promise<InstallerPreflightResult> {
-  if (input.sourceType === 'custom' || input.wingetId.startsWith('Custom.')) {
+  // Chocolatey items have no winget manifest to validate against - the "installer"
+  // is always the official Chocolatey bootstrap script, not the real payload.
+  if (input.sourceType === 'custom' || input.sourceType === 'chocolatey' || input.wingetId.startsWith('Custom.')) {
     return { cacheKey: '', status: 'skipped', source: 'custom' };
   }
   if (isHostedRuntime() && !getHealthClient()) {
@@ -389,7 +391,7 @@ export async function quarantineInstaller(
   reasonCode = 'HASH_MISMATCH',
   reasonMessage = 'The installer failed SHA256 verification and is quarantined',
 ): Promise<void> {
-  if (input.sourceType === 'custom' || input.wingetId.startsWith('Custom.')) return;
+  if (input.sourceType === 'custom' || input.sourceType === 'chocolatey' || input.wingetId.startsWith('Custom.')) return;
   assertTrustedInput(input);
   const cacheKey = createInstallerHealthKey(input);
   await writeHealth(buildHealthRow(cacheKey, input, 'quarantined', {

@@ -1223,7 +1223,7 @@ jobs:
           }
 
       # Tenant-wide duplicate guard: skips deployment (duplicate_skipped callback)
-      # when the same app was already deployed to this tenant via IntuneGet by
+      # when the same app was already deployed to this tenant via HKS App Deployment by
       # anyone. Non-fatal on Graph errors; bypassed when forceCreate is set.
       - name: Check for duplicate app
         env:
@@ -1443,16 +1443,16 @@ jobs:
               "`$WingetId = `"$wingetId`""
               "`$SanitizedWingetId = `$WingetId -replace '[\.\-]', '_'"
               ""
-              "# Check 1: IntuneGet registry marker (HKLM for machine-scope, HKCU for user-scope)"
+              "# Check 1: HKS App Deployment registry marker (HKLM for machine-scope, HKCU for user-scope)"
               "`$intuneGetPaths = @("
-              "    `"HKLM:\SOFTWARE\IntuneGet\Apps\`$SanitizedWingetId`","
-              "    `"HKCU:\SOFTWARE\IntuneGet\Apps\`$SanitizedWingetId`""
+              "    `"HKLM:\SOFTWARE\HKS\Apps\`$SanitizedWingetId`","
+              "    `"HKCU:\SOFTWARE\HKS\Apps\`$SanitizedWingetId`""
               ")"
               "foreach (`$intuneGetPath in `$intuneGetPaths) {"
               "    if (Test-Path `$intuneGetPath) {"
               "        `$marker = Get-ItemProperty `$intuneGetPath -ErrorAction SilentlyContinue"
               "        if (`$marker.DisplayName) {"
-              "            Write-Output `"Detected via IntuneGet marker: `$(`$marker.DisplayName) v`$(`$marker.Version)`""
+              "            Write-Output `"Detected via HKS App Deployment marker: `$(`$marker.DisplayName) v`$(`$marker.Version)`""
               "            exit 0"
               "        }"
               "    }"
@@ -1514,9 +1514,9 @@ jobs:
             Write-Host "No icon found in $iconDir, deploying without icon"
           }
 
-          $sourceMarker = "Source: IntuneGet.com"
+          $sourceMarker = "Source: HKS App Deployment"
           $baseDescription = if ([string]::IsNullOrWhiteSpace($env:DESCRIPTION)) {
-            "Deployed via IntuneGet from Winget: $env:WINGET_ID"
+            "Deployed via HKS App Deployment from Winget: $env:WINGET_ID"
           } else {
             $env:DESCRIPTION
           }
@@ -1532,7 +1532,7 @@ jobs:
             displayName = $env:DISPLAY_NAME
             displayVersion = $env:VERSION
             publisher = $env:PUBLISHER
-            notes = "IntuneGet deployment job: $env:JOB_ID"
+            notes = "HKS App Deployment job: $env:JOB_ID"
             description = $descriptionWithSource
             largeIcon = $largeIcon
             fileName = "$env:PACKAGE_FILENAME"
@@ -1565,7 +1565,7 @@ jobs:
 
           # Reconcile app creation with a durable job marker. A timed-out POST may
           # have succeeded in Intune, so retrying it blindly can create duplicates.
-          $jobMarker = "IntuneGet deployment job: $env:JOB_ID"
+          $jobMarker = "HKS App Deployment job: $env:JOB_ID"
           function Find-IntuneAppForJob {
             try {
               $escapedDisplayName = $env:DISPLAY_NAME.Replace("'", "''")

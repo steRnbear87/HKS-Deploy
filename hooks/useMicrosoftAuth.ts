@@ -46,6 +46,14 @@ export function useMicrosoftAuth() {
   // Track if we've already tracked this session's sign-in
   const hasTrackedSignInRef = useRef<string | null>(null);
 
+  // Windows Update page mounts ~8 hooks that all call getAccessToken() in the
+  // same tick (Radix Tabs renders every tab panel up front, each with its own
+  // data hook). Without this, each fires its own acquireTokenSilent call
+  // concurrently, which can contend on MSAL's token refresh and leave some
+  // callers with a null token. Sharing one in-flight promise collapses them
+  // into a single acquisition.
+  const inFlightTokenRef = useRef<Promise<string | null> | null>(null);
+
   /**
    * Force refresh the token, bypassing cache
    */
@@ -90,48 +98,60 @@ export function useMicrosoftAuth() {
    * Get access token, with automatic refresh if expiring soon
    */
   const getAccessToken = useCallback(async (): Promise<string | null> => {
-    if (accounts.length === 0) {
-      return null;
-    }
-    const account = instance.getActiveAccount() ?? accounts[0];
-
-    // Check if we have a cached token that's expiring soon (< 5 minutes)
-    if (
-      cachedTokenRef.current &&
-      isTokenExpiringSoon(cachedTokenRef.current, 5)
-    ) {
-      // Force refresh the token
-      return await refreshToken();
+    if (inFlightTokenRef.current) {
+      return inFlightTokenRef.current;
     }
 
-    try {
-      const tokenResponse = await instance.acquireTokenSilent({
-        scopes: graphScopes,
-        account,
-      });
-
-      cachedTokenRef.current = tokenResponse.accessToken;
-      tokenExpiryRef.current = tokenResponse.expiresOn?.getTime() || null;
-
-      return tokenResponse.accessToken;
-    } catch (error) {
-      if (error instanceof InteractionRequiredAuthError) {
-        try {
-          const tokenResponse = await instance.acquireTokenPopup({
-            scopes: graphScopes,
-            account,
-          });
-
-          cachedTokenRef.current = tokenResponse.accessToken;
-          tokenExpiryRef.current = tokenResponse.expiresOn?.getTime() || null;
-
-          return tokenResponse.accessToken;
-        } catch {
-          return null;
-        }
+    const acquire = async (): Promise<string | null> => {
+      if (accounts.length === 0) {
+        return null;
       }
-      return null;
-    }
+      const account = instance.getActiveAccount() ?? accounts[0];
+
+      // Check if we have a cached token that's expiring soon (< 5 minutes)
+      if (
+        cachedTokenRef.current &&
+        isTokenExpiringSoon(cachedTokenRef.current, 5)
+      ) {
+        // Force refresh the token
+        return await refreshToken();
+      }
+
+      try {
+        const tokenResponse = await instance.acquireTokenSilent({
+          scopes: graphScopes,
+          account,
+        });
+
+        cachedTokenRef.current = tokenResponse.accessToken;
+        tokenExpiryRef.current = tokenResponse.expiresOn?.getTime() || null;
+
+        return tokenResponse.accessToken;
+      } catch (error) {
+        if (error instanceof InteractionRequiredAuthError) {
+          try {
+            const tokenResponse = await instance.acquireTokenPopup({
+              scopes: graphScopes,
+              account,
+            });
+
+            cachedTokenRef.current = tokenResponse.accessToken;
+            tokenExpiryRef.current = tokenResponse.expiresOn?.getTime() || null;
+
+            return tokenResponse.accessToken;
+          } catch {
+            return null;
+          }
+        }
+        return null;
+      }
+    };
+
+    const promise = acquire().finally(() => {
+      inFlightTokenRef.current = null;
+    });
+    inFlightTokenRef.current = promise;
+    return promise;
   }, [instance, accounts, refreshToken]);
 
   /**

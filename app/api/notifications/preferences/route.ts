@@ -5,7 +5,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { createServerClient } from '@/lib/supabase';
+import { createServerClient, isSupabaseConfigured } from '@/lib/supabase';
 import { parseAccessToken } from '@/lib/auth-utils';
 import { sendTestEmail, isEmailConfigured } from '@/lib/email/service';
 import type {
@@ -31,6 +31,23 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    const defaultPreferences: Partial<NotificationPreferences> = {
+      user_id: user.userId,
+      email_enabled: false,
+      email_frequency: 'daily',
+      email_address: null,
+      notify_critical_only: false,
+    };
+
+    // Notification preferences are stored in a Supabase-only table with no
+    // SQLite equivalent; self-hosted installs just get the defaults.
+    if (!isSupabaseConfigured()) {
+      return NextResponse.json({
+        preferences: defaultPreferences,
+        isEmailConfigured: isEmailConfigured(),
+      });
+    }
+
     const supabase = createServerClient();
 
     // Get user's notification preferences
@@ -49,13 +66,6 @@ export async function GET(request: NextRequest) {
 
     // If no preferences exist, return defaults
     if (!preferences) {
-      const defaultPreferences: Partial<NotificationPreferences> = {
-        user_id: user.userId,
-        email_enabled: false,
-        email_frequency: 'daily',
-        email_address: null,
-        notify_critical_only: false,
-      };
       return NextResponse.json({
         preferences: defaultPreferences,
         isEmailConfigured: isEmailConfigured(),
@@ -66,7 +76,8 @@ export async function GET(request: NextRequest) {
       preferences: preferences as NotificationPreferences,
       isEmailConfigured: isEmailConfigured(),
     });
-  } catch {
+  } catch (error) {
+    console.error('[GET /api/notifications/preferences] Unhandled error:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }
@@ -85,6 +96,13 @@ export async function PUT(request: NextRequest) {
       return NextResponse.json(
         { error: 'Authentication required' },
         { status: 401 }
+      );
+    }
+
+    if (!isSupabaseConfigured()) {
+      return NextResponse.json(
+        { error: 'Notification preferences are not supported in self-hosted SQLite mode. This feature requires Supabase.' },
+        { status: 501 }
       );
     }
 
@@ -157,7 +175,8 @@ export async function PUT(request: NextRequest) {
       testEmailSent: testEmailResult?.success ?? false,
       testEmailError: testEmailResult?.error,
     });
-  } catch {
+  } catch (error) {
+    console.error('[PUT /api/notifications/preferences] Unhandled error:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }

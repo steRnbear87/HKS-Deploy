@@ -6,6 +6,23 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 /**
+ * Extract a first name for greetings from a display name. Handles the
+ * "Prefix LastName, FirstName" convention (e.g. Entra ID names like
+ * "ADM Dzekashu, Bernard") by taking the name after the last comma;
+ * otherwise falls back to the first whitespace-separated word.
+ */
+export function getFirstName(name: string | null | undefined, fallback = 'there'): string {
+  if (!name) return fallback;
+  const trimmed = name.trim();
+  if (!trimmed) return fallback;
+
+  const afterComma = trimmed.includes(',') ? trimmed.split(',').pop()?.trim() : null;
+  const source = afterComma || trimmed;
+
+  return source.split(' ')[0] || fallback;
+}
+
+/**
  * Format a timestamp as relative time (e.g., "Just now", "5m ago", "2h ago")
  */
 export function formatRelativeTime(timestamp: string | Date): string {

@@ -3,6 +3,33 @@
 -- Integrates with existing discovered apps infrastructure
 
 -- ============================================================================
+-- Table: user_profiles
+-- Missing from the upstream migration history (schema drift on the original
+-- project) but required as the FK target below and read/written throughout
+-- the app (lib/auth.ts, app/api/profile/image, notifications, etc). Columns
+-- match types/database.ts's user_profiles Row type exactly.
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS user_profiles (
+  id TEXT PRIMARY KEY,
+  email TEXT,
+  name TEXT,
+  microsoft_access_token TEXT,
+  microsoft_refresh_token TEXT,
+  token_expires_at TIMESTAMPTZ,
+  intune_tenant_id TEXT,
+  tenant_name TEXT,
+  profile_image TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+DROP TRIGGER IF EXISTS update_user_profiles_updated_at ON user_profiles;
+CREATE TRIGGER update_user_profiles_updated_at
+  BEFORE UPDATE ON user_profiles
+  FOR EACH ROW
+  EXECUTE FUNCTION update_updated_at_column();
+
+-- ============================================================================
 -- Table: sccm_migrations
 -- Migration sessions with metadata and statistics
 -- ============================================================================

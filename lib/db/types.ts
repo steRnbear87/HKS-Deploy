@@ -79,6 +79,128 @@ export interface UploadHistoryRecord {
 }
 
 /**
+ * Daily per-tenant fleet-health rollup (Graph has no history of its own -
+ * this is our own snapshot of device compliance/staleness counts over time).
+ */
+export interface DeviceHealthSnapshot {
+  id: string;
+  tenant_id: string;
+  /** YYYY-MM-DD, UTC. */
+  snapshot_date: string;
+  captured_at: string;
+  total_devices: number;
+  compliant_count: number;
+  noncompliant_count: number;
+  in_grace_period_count: number;
+  config_manager_count: number;
+  unknown_count: number;
+  stale_count: number;
+  partial: boolean;
+  created_at: string;
+}
+
+/**
+ * A detected app-update, ready for the App Updates page to display. Mirrors
+ * the Supabase `update_check_results` table so the same shape is usable from
+ * either backend - `policy`/`has_prior_deployment` (Supabase-only concepts)
+ * are joined in at the route layer, not stored here.
+ */
+export interface UpdateCheckResultRecord {
+  id: string;
+  user_id: string;
+  tenant_id: string;
+  winget_id: string;
+  intune_app_id: string;
+  display_name: string;
+  current_version: string;
+  latest_version: string;
+  is_critical: boolean;
+  is_managed: boolean;
+  large_icon_type: string | null;
+  large_icon_value: string | null;
+  notified_at: string | null;
+  dismissed_at: string | null;
+  detected_at: string;
+  updated_at: string;
+}
+
+/**
+ * Aggregate rollout/drift status for one managed app: how many of the
+ * devices Graph reports telemetry for are on the version IntuneGet expects
+ * (expected_version, i.e. update_check_results.current_version) versus
+ * behind or ahead of it. No per-device rows - a live drill-down can reuse
+ * the existing detected-app-devices Graph pattern later if ever needed.
+ */
+export interface DeploymentDriftRecord {
+  id: string;
+  user_id: string;
+  tenant_id: string;
+  winget_id: string;
+  intune_app_id: string;
+  display_name: string;
+  expected_version: string;
+  total_devices_scanned: number;
+  on_expected_count: number;
+  behind_count: number;
+  ahead_count: number;
+  partial: boolean;
+  scanned_at: string;
+}
+
+/** One row per (tenant, day, app) - the fleet-wide "top installed apps" rollup. */
+export interface FleetAppInventoryRow {
+  id: string;
+  tenant_id: string;
+  /** YYYY-MM-DD, UTC. */
+  snapshot_date: string;
+  captured_at: string;
+  /** Normalized (lower/trim) displayName, used as the grouping key across app-version variants. */
+  app_key: string;
+  display_name: string;
+  publisher: string | null;
+  device_count: number;
+  devices_total: number;
+  partial: boolean;
+  created_at: string;
+}
+
+/**
+ * Current-state cache of each device's BIOS version, keyed one row per
+ * device (not a daily-accumulating snapshot like the two rollups above -
+ * BIOS rarely changes, so there's no value in retaining history, and a
+ * ~2,591-device fleet would add that many rows every day forever otherwise).
+ * `bios_version` is intentionally nullable and distinct from "no row yet":
+ * a row with `bios_version: null` means Graph was successfully queried and
+ * reported nothing (e.g. not yet collected, or a non-Windows device slipped
+ * through); no row at all means this device hasn't been captured today.
+ */
+export interface DeviceBiosInfoRecord {
+  id: string;
+  tenant_id: string;
+  device_id: string;
+  bios_version: string | null;
+  captured_at: string;
+}
+
+/**
+ * Maps a device to the dedicated single-device Entra ID group this tool
+ * creates/manages on its behalf. Intune's Windows Update Graph resources
+ * (update rings, feature/quality/driver update profiles) only support
+ * group-based assignment - there is no per-device target type - so "assign
+ * policy X to device Y" is implemented as "assign policy X to device Y's
+ * tool-managed group". One row per device; the same group is reused across
+ * every Windows Update policy type assigned to that device.
+ */
+export interface DeviceUpdateGroupRecord {
+  id: string;
+  tenant_id: string;
+  device_id: string;
+  azure_ad_device_id: string;
+  entra_group_id: string;
+  created_at: string;
+}
+
+/**
  * Job statistics
  */
 export interface JobStats {
@@ -176,5 +298,119 @@ export interface DatabaseAdapter {
      * Get upload history by user ID
      */
     getByUserId(userId: string, limit?: number): Promise<UploadHistoryRecord[]>;
+
+    /**
+     * Distinct (user_id, tenant_id) pairs across every deployment on record -
+     * the self-hosted SQLite source of "who to check for updates", since the
+     * Supabase-only notification_preferences/webhook_configurations/
+     * app_update_policies tables that also feed that discovery don't exist here.
+     */
+    getDistinctUserTenantPairs(): Promise<Array<{ user_id: string; intune_tenant_id: string | null }>>;
+  };
+
+  deviceHealthSnapshots: {
+    /**
+     * Insert or replace today's snapshot for a tenant (keyed on tenant_id + snapshot_date).
+     */
+    upsert(snapshot: Omit<DeviceHealthSnapshot, 'id' | 'created_at'>): Promise<DeviceHealthSnapshot>;
+
+    /**
+     * Snapshots for a tenant on or after sinceDate (YYYY-MM-DD), oldest first.
+     */
+    getByTenantId(tenantId: string, sinceDate: string): Promise<DeviceHealthSnapshot[]>;
+
+    /**
+     * Most recent snapshot for a tenant, or null if none exist yet.
+     */
+    getLatest(tenantId: string): Promise<DeviceHealthSnapshot | null>;
+
+    /**
+     * Prune snapshots older than cutoffDate (YYYY-MM-DD). Returns rows deleted.
+     */
+    deleteOlderThan(cutoffDate: string): Promise<number>;
+
+    /**
+     * Distinct tenant IDs that have at least one snapshot or packaging job -
+     * used by the snapshot job to know which tenants to capture.
+     */
+    getKnownTenantIds(): Promise<string[]>;
+  };
+
+  fleetAppInventory: {
+    /**
+     * Replace all rows for a tenant/date with a new top-N ranking in one
+     * atomic operation (delete-then-insert), so a re-run never leaves stale
+     * ranks mixed with fresh ones.
+     */
+    replaceForDate(
+      tenantId: string,
+      snapshotDate: string,
+      rows: Array<Omit<FleetAppInventoryRow, 'id' | 'created_at' | 'tenant_id' | 'snapshot_date'>>
+    ): Promise<void>;
+
+    /** Most recent day's ranked rows for a tenant, highest device_count first. */
+    getLatestForTenant(tenantId: string, limit?: number): Promise<FleetAppInventoryRow[]>;
+
+    /** Prune snapshots older than cutoffDate (YYYY-MM-DD). Returns rows deleted. */
+    deleteOlderThan(cutoffDate: string): Promise<number>;
+  };
+
+  updateCheckResults: {
+    /** Upsert on (user_id, tenant_id, winget_id, intune_app_id). */
+    upsertMany(rows: Array<Omit<UpdateCheckResultRecord, 'id'>>): Promise<void>;
+
+    /** Powers GET /api/updates/available. */
+    getByUserId(
+      userId: string,
+      opts?: { tenantId?: string; includeDismissed?: boolean; criticalOnly?: boolean }
+    ): Promise<UpdateCheckResultRecord[]>;
+
+    /** Bulk read across many users at once - powers the cron's prior-row/stale-row logic. */
+    getByUserIds(userIds: string[]): Promise<UpdateCheckResultRecord[]>;
+
+    /** Powers PATCH /api/updates/available (dismiss/restore). Scoped by user for safety. */
+    setDismissed(ids: string[], userId: string, dismissed: boolean): Promise<number>;
+
+    /** Stale-row cleanup (cron + refresh route). */
+    deleteByIds(ids: string[]): Promise<number>;
+
+    /** Post-deploy cleanup: clear a resolved update once the app has been redeployed. */
+    deleteByUserTenantWinget(userId: string, tenantId: string, wingetId: string): Promise<number>;
+
+    /** Prune rows older than cutoffDate (ISO timestamp). Returns rows deleted. */
+    deleteOlderThan(cutoffDate: string): Promise<number>;
+  };
+
+  deploymentDrift: {
+    /** Upsert on (user_id, tenant_id, winget_id, intune_app_id). */
+    upsertMany(rows: Array<Omit<DeploymentDriftRecord, 'id'>>): Promise<void>;
+
+    /** Powers the rollout join in GET /api/updates/available. */
+    getByUserId(userId: string, opts?: { tenantId?: string }): Promise<DeploymentDriftRecord[]>;
+
+    /** Prune rows older than cutoffDate (ISO timestamp). Returns rows deleted. */
+    deleteOlderThan(cutoffDate: string): Promise<number>;
+  };
+
+  deviceBiosInfo: {
+    /** Upsert on (tenant_id, device_id). */
+    upsertMany(rows: Array<Omit<DeviceBiosInfoRecord, 'id'>>): Promise<void>;
+
+    /** One bulk read per tenant - used both by the capture job (to compute
+     * "already captured today") and the devices list route's join. Never
+     * do per-device lookups here. */
+    getByTenantId(tenantId: string): Promise<DeviceBiosInfoRecord[]>;
+
+    /** Deletes cached rows for devices no longer in the tenant's live fleet
+     * (retired/removed) - this table has no date column to prune by age. */
+    pruneRemoved(tenantId: string, currentDeviceIds: string[]): Promise<number>;
+  };
+
+  deviceUpdateGroups: {
+    /** Looks up the tool-managed group for a device, if one has been created. */
+    getByDeviceId(tenantId: string, deviceId: string): Promise<DeviceUpdateGroupRecord | null>;
+
+    /** Upsert on (tenant_id, device_id) - creates or repoints the mapping. */
+    upsert(row: Omit<DeviceUpdateGroupRecord, 'id' | 'created_at'>): Promise<DeviceUpdateGroupRecord>;
   };
 }
