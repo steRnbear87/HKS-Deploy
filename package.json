@@ -60,7 +60,7 @@
     "zustand": "^5.0.14"
   },
   "optionalDependencies": {
-    "better-sqlite3": "^12.11.1"
+    "better-sqlite3": "^13.0.1"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.2",
