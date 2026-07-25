@@ -76,6 +76,13 @@ jobs:
             removeNSPrefix: true, // collapse d:/m: namespace prefixes to plain tag names
           });
 
+          // Set when a page exhausts all retries - the feed's natural end
+          // (confirmed empirically: it terminates with a run of 406s past the
+          // last real page rather than a clean empty page) looks identical to
+          // a genuine outage from here, so we don't throw either way: losing
+          // one page is far cheaper than discarding every page already fetched.
+          let pageFetchGaveUp = false;
+
           async function fetchPage(skip) {
             const url = `${FEED_URL}?$filter=IsLatestVersion eq true&$orderby=Id&$top=${PAGE_SIZE}&$skip=${skip}`;
             for (let attempt = 1; attempt <= 4; attempt++) {
@@ -93,7 +100,13 @@ jobs:
                 if (!entries) return [];
                 return Array.isArray(entries) ? entries : [entry_wrap(entries)];
               } catch (err) {
-                if (attempt === 4) throw err;
+                if (attempt === 4) {
+                  console.warn(
+                    `Page skip=${skip} failed after 4 attempts (${err.message}). Stopping pagination here and importing the ${skip} packages already fetched, rather than discarding all of them.`
+                  );
+                  pageFetchGaveUp = true;
+                  return [];
+                }
                 console.warn(`Page skip=${skip} attempt ${attempt} failed: ${err.message}. Retrying...`);
                 await new Promise((r) => setTimeout(r, 2000 * attempt));
               }
@@ -259,6 +272,7 @@ jobs:
                 upserted: totalUpserted,
                 purged_stale: purged,
                 batch_errors: errors,
+                page_fetch_gave_up: pageFetchGaveUp,
               },
               updated_at: new Date().toISOString(),
             });
@@ -271,12 +285,16 @@ jobs:
             console.log(`  - Successfully upserted: ${totalUpserted}`);
             console.log(`  - Purged stale rows: ${purged}`);
             console.log(`  - Batch errors: ${errors}`);
+            if (pageFetchGaveUp) {
+              console.log(`  - NOTE: pagination stopped early after exhausting retries on one page (see warning above) - catalog may be incomplete.`);
+            }
 
             fs.writeFileSync('./import-stats.json', JSON.stringify({
               total: rows.length,
               upserted: totalUpserted,
               purged_stale: purged,
               errors,
+              page_fetch_gave_up: pageFetchGaveUp,
             }));
 
             if (errors > 0) {
@@ -288,12 +306,16 @@ jobs:
             process.exit(0);
           }).catch(async (err) => {
             console.error('Chocolatey sync failed:', err.message);
-            await supabase.from('curated_sync_status').upsert({
-              id: 'sync-chocolatey-catalog',
-              last_run_status: 'failed',
-              error_message: err.message,
-              updated_at: new Date().toISOString(),
-            }).catch((e) => console.error('Could not persist failed sync status:', e.message));
+            try {
+              await supabase.from('curated_sync_status').upsert({
+                id: 'sync-chocolatey-catalog',
+                last_run_status: 'failed',
+                error_message: err.message,
+                updated_at: new Date().toISOString(),
+              });
+            } catch (e) {
+              console.error('Could not persist failed sync status:', e.message);
+            }
             process.exit(1);
           });
           EOF

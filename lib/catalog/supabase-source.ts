@@ -19,10 +19,12 @@ import type { LocaleVariant } from '@/types/winget';
 import type { CuratedAppMatch } from '@/lib/app-mappings';
 import type { InstallationSnapshot } from '@/lib/winget-api';
 import type {
+  CatalogFilterOptions,
   CatalogSource,
   CategoryCount,
   CuratedAppRpcRow,
   CuratedAppWithDetails,
+  LicenseBucket,
   PopularPackagesResult,
   SccmCuratedAppRow,
   SccmMappingQuery,
@@ -31,6 +33,128 @@ import type {
   VersionInstallerInfo,
   WingetIdLatestVersion,
 } from './types';
+
+/**
+ * Postgres has no license_bucket column (only the SQLite snapshot computes
+ * one), so bucket filtering here is approximated with the same keyword
+ * families the snapshot builder's classifyLicense uses, expressed as ILIKE
+ * patterns. Good enough for filtering; not a byte-for-byte match with the
+ * SQLite classifier's edge cases.
+ */
+const LICENSE_BUCKET_ILIKE_PATTERNS: Record<LicenseBucket, string[]> = {
+  'open-source': ['%mit%', '%gpl%', '%bsd%', '%apache%', '%mpl%', '%mozilla public%', '%isc%', '%zlib%', '%unlicense%', '%cc0%', '%public domain%', '%wtfpl%', '%eclipse public%', '%eupl%', '%gnu%'],
+  freeware: ['%freeware%', '%freemium%', '%donationware%', '%free for personal%', '%non-commercial%', '%creative commons%'],
+  proprietary: ['%proprietary%', '%commercial%', '%eula%', '%end user license%', '%all rights reserved%', '%copyright%', '%closed source%', '%trial%', '%shareware%'],
+  unknown: [],
+};
+
+/** Builds a Supabase `.or()` filter string matching any pattern in `patterns` against `column`. */
+function orIlike(column: string, patterns: string[]): string {
+  return patterns.map((p) => `${column}.ilike.${p}`).join(',');
+}
+
+/**
+ * Same heuristic as scripts/build-catalog-snapshot.mjs's classifyLicense,
+ * duplicated here (rather than imported) since that script is a standalone
+ * Node tool and this module ships in the Next.js bundle. Used to attach a
+ * license_bucket to rows read from Postgres, which has no such column.
+ */
+function classifyLicenseForDisplay(license: string | null | undefined): LicenseBucket {
+  if (!license || !license.trim()) return 'unknown';
+  const s = license.trim();
+  if (/business source license|\bbusl\b|elastic[\s-]?license|elastic-\d|server side public license|\bsspl\b|polyform|fair source|fair core license|\bfsl-|functional source license|commons clause/i.test(s)) {
+    return 'proprietary';
+  }
+  if (/\bmit\b|\bgpl\b|\bgplv?\d|general public licen[cs]e|\bagpl\b|\bagplv?\d|\blgpl\b|\blgplv?\d|\bbsd\b|0bsd|\bapache\b|\bmpl\b|\bmplv?\d|mozilla public license|\bisc\b|\bzlib\b|libpng|\bunlicense\b|\bcc0\b|creative commons zero|public domain|\bwtfpl\b|\bepl\b|eclipse public license|\beupl\b|european union public licen[cs]e|\bpsf\b|python software foundation|\bgnu\b|boost software license|bsl-1\.0|\bx11 license\b|artistic licen[cs]e|artistic-\d|\bosl\b|\bcpal\b|\bcpl\b|\bnposl\b|blueoak|\bupl\b|mulan|\bms-pl\b|\bms-rl\b|microsoft public license|microsoft reciprocal license|php license/i.test(s)) {
+    return 'open-source';
+  }
+  if (/\bfreeware\b|\bfreemium\b|donationware|cardware|free for personal|free for non-commercial|non-?commercial|creative commons|\bcc[\s-]?by\b|no-fee terms/i.test(s)) {
+    return 'freeware';
+  }
+  if (/proprietary|commercial|\beula\b|end user license|license agreement|all rights reserved|copyright|closed source|\btrial\b|trialware|shareware|©|\(c\)/i.test(s)) {
+    return 'proprietary';
+  }
+  return 'unknown';
+}
+
+/**
+ * Resolves an installerTypes filter to the set of (winget_id, version) pairs
+ * whose installer_type matches, then narrows to the winget_ids whose CURRENT
+ * latest_version is one of those matching versions. Two-step because the
+ * Supabase JS query builder can't express "join curated_apps to
+ * version_history on two columns" directly.
+ */
+async function resolveInstallerTypeWingetIds(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  supabase: any,
+  installerTypes: string[]
+): Promise<Set<string> | null> {
+  const { data, error } = await supabase
+    .from('version_history')
+    .select('winget_id, version')
+    .in('installer_type', installerTypes);
+  if (error || !data) return null;
+  return new Set(data.map((r: { winget_id: string; version: string }) => `${r.winget_id}::${r.version}`));
+}
+
+/**
+ * Applies the shared facet filters to a Supabase query builder. Both
+ * getPopularApps (data + count queries) and searchApps's ILIKE fallback use
+ * this so behavior stays in sync with the SQLite source's buildFilterConditions.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type QueryBuilderMethod = (...args: any[]) => any;
+
+function applyCatalogFilters<
+  T extends {
+    eq: QueryBuilderMethod;
+    in: QueryBuilderMethod;
+    ilike: QueryBuilderMethod;
+    or: QueryBuilderMethod;
+    is: QueryBuilderMethod;
+    contains: QueryBuilderMethod;
+  },
+>(
+  query: T,
+  filters: CatalogFilterOptions | undefined
+): T {
+  const f = filters || {};
+  let q = query;
+
+  if (f.includeLocaleVariants !== true) {
+    q = q.eq('is_locale_variant', false);
+  }
+
+  if (f.needsCategorization) {
+    q = q.is('category', null);
+  } else if (f.categories && f.categories.length > 0) {
+    q = q.in('category', f.categories);
+  }
+
+  if (f.publisher) {
+    q = q.ilike('publisher', `%${f.publisher}%`);
+  }
+
+  if (f.tag) {
+    // Postgres `tags` is a text[] column - `.contains` requires an exact
+    // element match, unlike the SQLite source's substring LIKE on the JSON
+    // blob. Close enough for an autocomplete-style single-tag pick.
+    q = q.contains('tags', [f.tag]);
+  }
+
+  if (f.appSources && f.appSources.length > 0) {
+    q = q.in('app_source', f.appSources);
+  }
+
+  if (f.licenseBuckets && f.licenseBuckets.length > 0) {
+    const patterns = f.licenseBuckets.flatMap((b) => LICENSE_BUCKET_ILIKE_PATTERNS[b]);
+    if (patterns.length > 0) {
+      q = q.or(orIlike('license', patterns));
+    }
+  }
+
+  return q;
+}
 
 /**
  * Raw Supabase client using the service-or-anon key, matching the
@@ -57,18 +181,28 @@ export class SupabaseCatalogSource implements CatalogSource {
 
   async searchApps(
     query: string,
-    opts: { limit: number; category?: string | null; sort?: SearchSort }
+    opts: {
+      limit: number;
+      category?: string | null;
+      sort?: SearchSort;
+      filters?: CatalogFilterOptions;
+    }
   ): Promise<{ data: CuratedAppRpcRow[] | null; error: { message: string } | null }> {
     const supabase = serviceOrAnonClient();
     if (!supabase) {
       return { data: null, error: { message: 'Supabase configuration missing' } };
     }
 
+    // search_curated_apps is a Postgres stored function; it only accepts
+    // category_filter today. The new facets (publisher/tag/license/etc.) are
+    // not yet applied to Supabase-mode search results - only to browse
+    // (getPopularApps) below - since wiring them in would mean modifying a
+    // function on the shared hosted database.
     const { data: curatedData, error: curatedError } = await supabase.rpc(
       'search_curated_apps',
       {
         search_query: query,
-        category_filter: opts.category || null,
+        category_filter: opts.category || opts.filters?.categories?.[0] || null,
         result_limit: opts.limit,
       }
     );
@@ -84,6 +218,7 @@ export class SupabaseCatalogSource implements CatalogSource {
     offset: number;
     category?: string | null;
     sort: SearchSort;
+    filters?: CatalogFilterOptions;
   }): Promise<PopularPackagesResult | null> {
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const supabaseKey =
@@ -96,39 +231,55 @@ export class SupabaseCatalogSource implements CatalogSource {
     const supabase = createClient(supabaseUrl, supabaseKey);
 
     const { limit, offset, category, sort } = opts;
+    const filters: CatalogFilterOptions = {
+      ...opts.filters,
+      categories: opts.filters?.categories?.length ? opts.filters.categories : category ? [category] : null,
+    };
 
-    const baseQuery = supabase
-      .from('curated_apps')
-      .select('*', { count: 'exact', head: true })
-      .eq('is_verified', true)
-      .eq('is_locale_variant', false);
+    let matchingWingetIds: Set<string> | null = null;
+    if (filters.installerTypes && filters.installerTypes.length > 0) {
+      matchingWingetIds = await resolveInstallerTypeWingetIds(supabase, filters.installerTypes);
+      if (!matchingWingetIds || matchingWingetIds.size === 0) {
+        return { data: [], total: 0 };
+      }
+    }
+    const candidateWingetIds = matchingWingetIds
+      ? Array.from(new Set(Array.from(matchingWingetIds, (k) => k.split('::')[0])))
+      : null;
 
-    const countQuery = category ? baseQuery.eq('category', category) : baseQuery;
-    const { count: totalCount, error: countError } = await countQuery;
+    const buildBaseQuery = (selectArg: string, opts2: { count?: 'exact'; head?: boolean } = {}) => {
+      let q = supabase.from('curated_apps').select(selectArg, opts2).eq('is_verified', true);
+      q = applyCatalogFilters(q, filters);
+      if (candidateWingetIds) {
+        q = q.in('winget_id', candidateWingetIds);
+      }
+      return q;
+    };
+
+    // NOTE: when installerTypes is set, this count is an upper bound - it
+    // matches on winget_id membership only, not the exact (winget_id,
+    // latest_version) pairing the data query narrows to below, since Supabase
+    // JS can't express that two-column join in a single count() call.
+    const { count: totalCount, error: countError } = await buildBaseQuery('*', {
+      count: 'exact',
+      head: true,
+    });
 
     if (countError) {
-      console.error('Failed to count curated packages', { error: countError, category });
+      console.error('Failed to count curated packages', { error: countError, filters });
       return null;
     }
 
-    let dataQuery = supabase
-      .from('curated_apps')
-      .select(
-        'id, winget_id, name, publisher, latest_version, description, homepage, category, tags, icon_path, popularity_rank, app_source, store_package_id'
-      )
-      .eq('is_verified', true)
-      .eq('is_locale_variant', false);
-
-    if (category) {
-      dataQuery = dataQuery.eq('category', category);
-    }
+    let dataQuery = buildBaseQuery(
+      'id, winget_id, name, publisher, latest_version, description, homepage, category, tags, icon_path, popularity_rank, app_source, store_package_id, license, winget_last_update'
+    );
 
     switch (sort) {
       case 'name':
         dataQuery = dataQuery.order('name', { ascending: true });
         break;
       case 'newest':
-        dataQuery = dataQuery.order('created_at', { ascending: false });
+        dataQuery = dataQuery.order('winget_last_update', { ascending: false, nullsFirst: false });
         break;
       case 'popular':
       default:
@@ -141,12 +292,23 @@ export class SupabaseCatalogSource implements CatalogSource {
     const { data, error } = await dataQuery.range(offset, offset + limit - 1);
 
     if (error) {
-      console.error('Failed to query curated packages', { error, category, sort, limit, offset });
+      console.error('Failed to query curated packages', { error, filters, sort, limit, offset });
       return null;
     }
 
+    let rows = (data || []) as unknown as Array<
+      PopularPackagesResult['data'][number] & { license?: string | null }
+    >;
+    // Narrow to rows whose CURRENT latest_version matches (the winget_id
+    // pre-filter above can include apps where an older version had this
+    // installer type but the latest one doesn't).
+    if (matchingWingetIds) {
+      const ids = matchingWingetIds;
+      rows = rows.filter((r) => ids.has(`${r.winget_id}::${r.latest_version}`));
+    }
+
     return {
-      data: (data || []) as PopularPackagesResult['data'],
+      data: rows.map((r) => ({ ...r, license_bucket: classifyLicenseForDisplay(r.license) })),
       total: totalCount || 0,
     };
   }
@@ -212,6 +374,26 @@ export class SupabaseCatalogSource implements CatalogSource {
     }
 
     const { count } = await query;
+    return count ?? null;
+  }
+
+  async getUncategorizedCount(): Promise<number | null> {
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const supabaseKey =
+      process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+    if (!supabaseUrl || !supabaseKey) {
+      return null;
+    }
+
+    const supabase = createClient(supabaseUrl, supabaseKey);
+    const { count } = await supabase
+      .from('curated_apps')
+      .select('*', { count: 'exact', head: true })
+      .eq('is_verified', true)
+      .eq('is_locale_variant', false)
+      .is('category', null);
+
     return count ?? null;
   }
 
