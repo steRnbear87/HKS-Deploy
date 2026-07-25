@@ -76,8 +76,8 @@ jobs:
             removeNSPrefix: true, // collapse d:/m: namespace prefixes to plain tag names
           });
 
-          async function fetchPage(filter, skip) {
-            const url = `${FEED_URL}?$filter=${encodeURIComponent(filter)}&$orderby=Id&$top=${PAGE_SIZE}&$skip=${skip}`;
+          async function fetchPage(skip) {
+            const url = `${FEED_URL}?$filter=IsLatestVersion eq true&$orderby=Id&$top=${PAGE_SIZE}&$skip=${skip}`;
             for (let attempt = 1; attempt <= 4; attempt++) {
               try {
                 const res = await fetch(url, {
@@ -172,30 +172,19 @@ jobs:
               throw new Error(`Failed to mark Chocolatey sync as running: ${startStatusError.message}`);
             }
 
-            // The feed's $skip is capped by the server (HTTP 406 past ~10,000
-            // regardless of $top), so a single unbucketed walk can never reach
-            // packages beyond that point. Partition by first character of Id
-            // (case-insensitive) and restart $skip at 0 per bucket - with
-            // ~14k packages spread across 36 buckets, no single bucket comes
-            // close to the cap.
-            const BUCKETS = '0123456789abcdefghijklmnopqrstuvwxyz'.split('');
             const allRows = [];
-            outer:
-            for (const bucket of BUCKETS) {
-              const filter = `IsLatestVersion eq true and startswith(tolower(Id),'${bucket}')`;
-              let skip = 0;
-              let page;
-              while ((page = await fetchPage(filter, skip)).length > 0) {
-                for (const entry of page) {
-                  const row = entryToRow(entry);
-                  if (row) allRows.push(row);
-                }
-                console.log(`Fetched page at bucket=${bucket} skip=${skip}: ${page.length} entries (total so far: ${allRows.length})`);
-                skip += PAGE_SIZE;
-                if (importLimit > 0 && allRows.length >= importLimit) break outer;
-                // Be polite to the community feed between pages.
-                await new Promise((r) => setTimeout(r, 300));
+            let skip = 0;
+            let page;
+            while ((page = await fetchPage(skip)).length > 0) {
+              for (const entry of page) {
+                const row = entryToRow(entry);
+                if (row) allRows.push(row);
               }
+              console.log(`Fetched page at skip=${skip}: ${page.length} entries (total so far: ${allRows.length})`);
+              skip += PAGE_SIZE;
+              if (importLimit > 0 && allRows.length >= importLimit) break;
+              // Be polite to the community feed between pages.
+              await new Promise((r) => setTimeout(r, 300));
             }
 
             const rows = importLimit > 0 ? allRows.slice(0, importLimit) : allRows;
