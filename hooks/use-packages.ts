@@ -37,6 +37,31 @@ interface CategoriesResponse {
   count: number;
   totalApps: number;
   categories: Category[];
+  uncategorizedCount: number;
+}
+
+/** Extra facet filters layered on top of category/sort - see lib/catalog/filter-params.ts for the server-side parsing. */
+export interface CatalogFilters {
+  categories?: string[];
+  needsCategorization?: boolean;
+  publisher?: string;
+  tag?: string;
+  license?: string[];
+  source?: string[];
+  includeVariants?: boolean;
+  installerType?: string[];
+}
+
+function appendCatalogFilterParams(params: URLSearchParams, filters?: CatalogFilters) {
+  if (!filters) return;
+  if (filters.categories?.length) params.append('categories', filters.categories.join(','));
+  if (filters.needsCategorization) params.append('needsCategorization', 'true');
+  if (filters.publisher) params.append('publisher', filters.publisher);
+  if (filters.tag) params.append('tag', filters.tag);
+  if (filters.license?.length) params.append('license', filters.license.join(','));
+  if (filters.source?.length) params.append('source', filters.source.join(','));
+  if (filters.includeVariants) params.append('includeVariants', 'true');
+  if (filters.installerType?.length) params.append('installerType', filters.installerType.join(','));
 }
 
 interface ChangelogSummary {
@@ -76,9 +101,14 @@ interface InfinitePackagesResponse {
   hasMore: boolean;
 }
 
-export function useInfinitePackages(pageSize: number = 20, category?: string | null, sort?: string) {
+export function useInfinitePackages(
+  pageSize: number = 20,
+  category?: string | null,
+  sort?: string,
+  filters?: CatalogFilters
+) {
   return useInfiniteQuery<InfinitePackagesResponse>({
-    queryKey: ['packages', 'infinite', pageSize, category, sort],
+    queryKey: ['packages', 'infinite', pageSize, category, sort, filters],
     queryFn: async ({ pageParam = 0 }) => {
       const params = new URLSearchParams({
         limit: pageSize.toString(),
@@ -86,6 +116,7 @@ export function useInfinitePackages(pageSize: number = 20, category?: string | n
       });
       if (category) params.append('category', category);
       if (sort) params.append('sort', sort);
+      appendCatalogFilterParams(params, filters);
       const response = await fetch(`/api/winget/popular?${params.toString()}`);
       if (!response.ok) {
         throw new Error('Failed to fetch packages');
@@ -122,9 +153,15 @@ export function usePackagesByCategory(category: string, limit: number = 10) {
   });
 }
 
-export function useSearchPackages(query: string, limit: number = 50, category?: string | null, sort?: string) {
+export function useSearchPackages(
+  query: string,
+  limit: number = 50,
+  category?: string | null,
+  sort?: string,
+  filters?: CatalogFilters
+) {
   return useQuery<SearchPackagesResponse>({
-    queryKey: ['packages', 'search', query, limit, category, sort],
+    queryKey: ['packages', 'search', query, limit, category, sort, filters],
     queryFn: async () => {
       const params = new URLSearchParams({
         q: query,
@@ -132,6 +169,7 @@ export function useSearchPackages(query: string, limit: number = 50, category?: 
       });
       if (category) params.append('category', category);
       if (sort) params.append('sort', sort);
+      appendCatalogFilterParams(params, filters);
       const response = await fetch(`/api/winget/search?${params.toString()}`);
       if (!response.ok) {
         throw new Error('Search failed');

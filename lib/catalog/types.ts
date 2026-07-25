@@ -36,6 +36,8 @@ export interface CuratedAppRpcRow {
   rank?: number;
   app_source: string | null;
   store_package_id: string | null;
+  winget_last_update?: string | null;
+  license_bucket?: LicenseBucket | null;
 }
 
 /**
@@ -55,6 +57,8 @@ export interface PopularCuratedAppRow {
   popularity_rank: number | null;
   app_source: string | null;
   store_package_id: string | null;
+  winget_last_update?: string | null;
+  license_bucket?: LicenseBucket | null;
 }
 
 export interface PopularPackagesResult {
@@ -63,6 +67,32 @@ export interface PopularPackagesResult {
 }
 
 export type SearchSort = 'popular' | 'name' | 'newest';
+
+/** Coarse license facet computed by scripts/build-catalog-snapshot.mjs's classifyLicense. */
+export type LicenseBucket = 'open-source' | 'freeware' | 'proprietary' | 'unknown';
+
+/**
+ * Extra filter facets layered on top of the existing category/sort params.
+ * Every field is optional/additive - omitting all of them reproduces the
+ * pre-facets query behavior exactly.
+ */
+export interface CatalogFilterOptions {
+  /** Multi-select category filter. Ignored when needsCategorization is true. */
+  categories?: string[] | null;
+  /** Triage view: apps with no category assigned yet (category IS NULL). */
+  needsCategorization?: boolean;
+  /** Substring match against publisher. */
+  publisher?: string | null;
+  /** Substring match against the raw tags blob. */
+  tag?: string | null;
+  licenseBuckets?: LicenseBucket[] | null;
+  /** e.g. 'win32' | 'chocolatey' | 'store'. */
+  appSources?: string[] | null;
+  /** When false/omitted, locale-variant packages stay excluded (existing behavior). */
+  includeLocaleVariants?: boolean;
+  /** Installer type of the app's latest version (msi/exe/msix/...), joined from version_history. */
+  installerTypes?: string[] | null;
+}
 
 /**
  * Full curated_apps row (select('*')) used by getPackage.
@@ -160,7 +190,12 @@ export interface CatalogSource {
    *  its own error-handling (winget-api logs+throws; the route returns null). */
   searchApps(
     query: string,
-    opts: { limit: number; category?: string | null; sort?: SearchSort }
+    opts: {
+      limit: number;
+      category?: string | null;
+      sort?: SearchSort;
+      filters?: CatalogFilterOptions;
+    }
   ): Promise<{ data: CuratedAppRpcRow[] | null; error: { message: string } | null }>;
 
   /** curated_apps count + data query from /api/winget/popular getCuratedPackages. */
@@ -169,6 +204,7 @@ export interface CatalogSource {
     offset: number;
     category?: string | null;
     sort: SearchSort;
+    filters?: CatalogFilterOptions;
   }): Promise<PopularPackagesResult | null>;
 
   /** RPC get_popular_curated_apps (normalized in winget-api). */
@@ -182,6 +218,9 @@ export interface CatalogSource {
 
   /** curated_apps count(head) with optional is_verified filter. */
   getCategoryCount(opts: { verifiedOnly: boolean }): Promise<number | null>;
+
+  /** Count of verified, non-variant apps with no category assigned yet (the "needs categorization" triage view). */
+  getUncategorizedCount(): Promise<number | null>;
 
   // --- app detail ---
 

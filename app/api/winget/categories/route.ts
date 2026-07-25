@@ -18,10 +18,13 @@ export async function GET() {
       totalApps = count;
     }
 
+    const uncategorizedCount = await getCatalogSource().getUncategorizedCount();
+
     return NextResponse.json({
       count: categories.length,
       totalApps,
       categories,
+      uncategorizedCount: uncategorizedCount ?? 0,
     }, {
       headers: { 'Cache-Control': 'no-store, max-age=0' },
     });

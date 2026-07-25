@@ -156,6 +156,10 @@ export interface NormalizedPackage {
   category?: string;
   popularityRank?: number;
   installerType?: string;
+  // ISO timestamp of the winget manifest's last update (from the winget-pkgs-index), used for "Newest" sort/display.
+  lastUpdated?: string;
+  // Coarse license facet: 'open-source' | 'freeware' | 'proprietary' | 'unknown'.
+  licenseBucket?: string;
   // App source (win32 = winget LOB, store = Microsoft Store, chocolatey = Chocolatey Community Repository)
   appSource?: AppSource;
   // Microsoft Store product ID (e.g. "9WZDNCRFJ3PZ")

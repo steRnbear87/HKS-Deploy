@@ -27,6 +27,7 @@ const curatedApps = [
     latest_version: '120.0',
     description: 'Fast web browser',
     homepage: 'https://google.com',
+    license: 'Proprietary',
     tags: ['browser', 'web'],
     category: 'Browsers',
     is_verified: true,
@@ -34,6 +35,7 @@ const curatedApps = [
     popularity_rank: 1,
     app_source: 'winget',
     has_icon: true,
+    winget_last_update: '2026-01-01T00:00:00Z',
   },
   {
     id: 2,
@@ -42,11 +44,14 @@ const curatedApps = [
     publisher: 'Mozilla',
     latest_version: '121.0',
     description: 'Open source browser',
+    license: 'MPL-2.0',
     tags: ['browser'],
     category: 'Browsers',
     is_verified: true,
     is_locale_variant: false,
     popularity_rank: 2,
+    app_source: 'winget',
+    winget_last_update: '2026-06-01T00:00:00Z',
   },
   {
     id: 3,
@@ -59,6 +64,20 @@ const curatedApps = [
     is_verified: true,
     is_locale_variant: false,
     popularity_rank: 5,
+    app_source: 'chocolatey',
+  },
+  {
+    id: 5,
+    winget_id: 'Some.Uncategorized',
+    name: 'Mystery App',
+    publisher: 'Acme',
+    latest_version: '1.0',
+    tags: null,
+    category: null,
+    is_verified: true,
+    is_locale_variant: false,
+    popularity_rank: 20,
+    app_source: 'winget',
   },
   {
     id: 4,
@@ -159,8 +178,8 @@ describe('SnapshotCatalogSource', () => {
     });
     expect(result).not.toBeNull();
     expect(result?.data[0].winget_id).toBe('Google.Chrome');
-    // 3 verified non-variant apps (locale variant excluded)
-    expect(result?.total).toBe(3);
+    // 4 verified non-variant apps (locale variant excluded)
+    expect(result?.total).toBe(4);
   });
 
   it('getPopularPackages returns popularity-ordered rows', async () => {
@@ -253,11 +272,116 @@ describe('SnapshotCatalogSource', () => {
 
   it('getCatalogStats counts all curated apps', async () => {
     const stats = await source.getCatalogStats();
-    expect(stats.totalApps).toBe(4);
+    expect(stats.totalApps).toBe(5);
   });
 
   it('getCategoryCount respects verifiedOnly', async () => {
-    expect(await source.getCategoryCount({ verifiedOnly: true })).toBe(4);
-    expect(await source.getCategoryCount({ verifiedOnly: false })).toBe(4);
+    expect(await source.getCategoryCount({ verifiedOnly: true })).toBe(5);
+    expect(await source.getCategoryCount({ verifiedOnly: false })).toBe(5);
+  });
+
+  it('getUncategorizedCount counts verified non-variant apps with no category', async () => {
+    expect(await source.getUncategorizedCount()).toBe(1);
+  });
+
+  it('getPopularApps filters: multi-select categories', async () => {
+    const result = await source.getPopularApps({
+      limit: 10,
+      offset: 0,
+      sort: 'popular',
+      filters: { categories: ['Communication', 'Browsers'] },
+    });
+    // Browsers: Chrome, Firefox (Chrome.de locale variant excluded) + Communication: Zoom
+    expect(result?.total).toBe(3);
+  });
+
+  it('getPopularApps filters: needsCategorization', async () => {
+    const result = await source.getPopularApps({
+      limit: 10,
+      offset: 0,
+      sort: 'popular',
+      filters: { needsCategorization: true },
+    });
+    expect(result?.total).toBe(1);
+    expect(result?.data[0].winget_id).toBe('Some.Uncategorized');
+  });
+
+  it('getPopularApps filters: publisher substring match', async () => {
+    const result = await source.getPopularApps({
+      limit: 10,
+      offset: 0,
+      sort: 'popular',
+      filters: { publisher: 'Mozilla' },
+    });
+    expect(result?.total).toBe(1);
+    expect(result?.data[0].winget_id).toBe('Mozilla.Firefox');
+  });
+
+  it('getPopularApps filters: raw tag search', async () => {
+    const result = await source.getPopularApps({
+      limit: 10,
+      offset: 0,
+      sort: 'popular',
+      filters: { tag: 'web' },
+    });
+    expect(result?.data.map((r) => r.winget_id)).toEqual(['Google.Chrome']);
+  });
+
+  it('getPopularApps filters: license bucket', async () => {
+    const result = await source.getPopularApps({
+      limit: 10,
+      offset: 0,
+      sort: 'popular',
+      filters: { licenseBuckets: ['open-source'] },
+    });
+    expect(result?.data.map((r) => r.winget_id)).toEqual(['Mozilla.Firefox']);
+  });
+
+  it('getPopularApps filters: app source', async () => {
+    const result = await source.getPopularApps({
+      limit: 10,
+      offset: 0,
+      sort: 'popular',
+      filters: { appSources: ['chocolatey'] },
+    });
+    expect(result?.data.map((r) => r.winget_id)).toEqual(['Zoom.Zoom']);
+  });
+
+  it('getPopularApps filters: includeLocaleVariants', async () => {
+    const withVariants = await source.getPopularApps({
+      limit: 10,
+      offset: 0,
+      sort: 'popular',
+      filters: { includeLocaleVariants: true, categories: ['Browsers'] },
+    });
+    expect(withVariants?.total).toBe(3);
+    const withoutVariants = await source.getPopularApps({
+      limit: 10,
+      offset: 0,
+      sort: 'popular',
+      filters: { categories: ['Browsers'] },
+    });
+    expect(withoutVariants?.total).toBe(2);
+  });
+
+  it('getPopularApps filters: installer type (joined from version_history)', async () => {
+    const result = await source.getPopularApps({
+      limit: 10,
+      offset: 0,
+      sort: 'popular',
+      filters: { installerTypes: ['msi'] },
+    });
+    // Only Google.Chrome's latest_version (120.0) row has installer_type 'msi' in version_history
+    expect(result?.data.map((r) => r.winget_id)).toEqual(['Google.Chrome']);
+  });
+
+  it('getPopularApps sort: newest orders by winget_last_update desc', async () => {
+    const result = await source.getPopularApps({
+      limit: 10,
+      offset: 0,
+      sort: 'newest',
+      filters: { categories: ['Browsers'] },
+    });
+    expect(result?.data.map((r) => r.winget_id)).toEqual(['Mozilla.Firefox', 'Google.Chrome']);
   });
 });

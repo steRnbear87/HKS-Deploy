@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, type ReactNode } from 'react';
 import { T, Var } from "gt-next";
 import { useSearchParams } from 'next/navigation';
 import {
@@ -41,6 +41,7 @@ import {
   useCategories,
   useInfinitePackages,
   useCatalogPackage,
+  type CatalogFilters,
 } from '@/hooks/use-packages';
 import { useDeployedPackages } from '@/hooks/use-deployed-packages';
 import { useDeployedConfig } from '@/hooks/use-deployed-config';
@@ -75,6 +76,43 @@ const SORT_OPTIONS = [
   { key: 'newest', label: 'Newest', icon: Clock },
 ] as const;
 
+const LICENSE_OPTIONS = [
+  { key: 'open-source', label: 'Open Source' },
+  { key: 'freeware', label: 'Freeware' },
+  { key: 'proprietary', label: 'Proprietary' },
+  { key: 'unknown', label: 'Unknown' },
+] as const;
+
+const SOURCE_OPTIONS = [
+  { key: 'win32', label: 'Winget' },
+  { key: 'chocolatey', label: 'Chocolatey' },
+  { key: 'store', label: 'Microsoft Store' },
+] as const;
+
+// The real distribution of version_history.installer_type values in the catalog.
+const INSTALLER_TYPE_OPTIONS = [
+  { key: 'msi', label: 'MSI' },
+  { key: 'exe', label: 'EXE' },
+  { key: 'msix', label: 'MSIX' },
+  { key: 'appx', label: 'APPX' },
+  { key: 'inno', label: 'Inno Setup' },
+  { key: 'nullsoft', label: 'NSIS' },
+  { key: 'wix', label: 'WiX' },
+  { key: 'burn', label: 'Burn' },
+  { key: 'zip', label: 'Zip' },
+  { key: 'portable', label: 'Portable' },
+] as const;
+
+/** Debounces a fast-changing value (text input) so filter queries don't fire on every keystroke. */
+function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delayMs);
+    return () => clearTimeout(timer);
+  }, [value, delayMs]);
+  return debounced;
+}
+
 export default function AppCatalogPage() {
   const searchParams = useSearchParams();
   const [deploymentIntentId] = useState(() => searchParams.get('deploy')?.trim() || null);
@@ -84,12 +122,70 @@ export default function AppCatalogPage() {
   const [selectedPackage, setSelectedPackage] = useState<NormalizedPackage | null>(null);
   const [deploymentIntentError, setDeploymentIntentError] = useState<string | null>(null);
   const processedDeploymentIntentRef = useRef<string | null>(null);
-  const [selectedCategory, setSelectedCategory] = useState<string | null>(searchParams.get('category') || null);
+  const initialCategories = useMemo(() => {
+    const multi = searchParams.get('categories');
+    if (multi) return multi.split(',').map((c) => c.trim()).filter(Boolean);
+    const single = searchParams.get('category');
+    return single ? [single] : [];
+  }, [searchParams]);
+  const [selectedCategories, setSelectedCategories] = useState<string[]>(initialCategories);
   const validSorts = ['popular', 'name', 'newest'] as const;
   const sortParam = searchParams.get('sort');
   const [sortBy, setSortBy] = useState<'popular' | 'name' | 'newest'>(
     validSorts.includes(sortParam as typeof validSorts[number]) ? (sortParam as 'popular' | 'name' | 'newest') : 'popular'
   );
+
+  // New facet filters (multi-select categories above; the rest layer on top).
+  const [needsCategorization, setNeedsCategorization] = useState(false);
+  const [publisherInput, setPublisherInput] = useState('');
+  const publisherFilter = useDebouncedValue(publisherInput, 300);
+  const [tagInput, setTagInput] = useState('');
+  const tagFilter = useDebouncedValue(tagInput, 300);
+  const [selectedLicenseBuckets, setSelectedLicenseBuckets] = useState<string[]>([]);
+  const [selectedSources, setSelectedSources] = useState<string[]>([]);
+  const [includeVariants, setIncludeVariants] = useState(false);
+  const [selectedInstallerTypes, setSelectedInstallerTypes] = useState<string[]>([]);
+  const [openFilterSections, setOpenFilterSections] = useState({
+    publisher: false,
+    tag: false,
+    license: false,
+    source: false,
+    installerType: false,
+  });
+  const toggleFilterSection = useCallback((key: keyof typeof openFilterSections) => {
+    setOpenFilterSections((prev) => ({ ...prev, [key]: !prev[key] }));
+  }, []);
+
+  const activeFilters: CatalogFilters = useMemo(() => ({
+    categories: selectedCategories.length > 0 ? selectedCategories : undefined,
+    needsCategorization: needsCategorization || undefined,
+    publisher: publisherFilter.trim() || undefined,
+    tag: tagFilter.trim() || undefined,
+    license: selectedLicenseBuckets.length > 0 ? selectedLicenseBuckets : undefined,
+    source: selectedSources.length > 0 ? selectedSources : undefined,
+    includeVariants: includeVariants || undefined,
+    installerType: selectedInstallerTypes.length > 0 ? selectedInstallerTypes : undefined,
+  }), [
+    selectedCategories,
+    needsCategorization,
+    publisherFilter,
+    tagFilter,
+    selectedLicenseBuckets,
+    selectedSources,
+    includeVariants,
+    selectedInstallerTypes,
+  ]);
+  const hasExtraFilters =
+    needsCategorization ||
+    Boolean(publisherFilter.trim()) ||
+    Boolean(tagFilter.trim()) ||
+    selectedLicenseBuckets.length > 0 ||
+    selectedSources.length > 0 ||
+    includeVariants ||
+    selectedInstallerTypes.length > 0;
+
+  const toggleInList = (list: string[], value: string) =>
+    list.includes(value) ? list.filter((v) => v !== value) : [...list, value];
   const { settings: userSettings, setViewMode: persistViewMode } = useUserSettings();
   const [viewMode, setViewModeLocal] = useState<'grid' | 'list'>(userSettings.viewMode);
   const [mounted, setMounted] = useState(false);
@@ -114,7 +210,7 @@ export default function AppCatalogPage() {
   const mobileFilterTriggerRef = useRef<HTMLButtonElement>(null);
   const previousBrowseControlsRef = useRef({
     sortBy: 'popular' as 'popular' | 'name' | 'newest',
-    selectedCategory: null as string | null,
+    selectedCategories: [] as string[],
     hasSearched: false,
   });
 
@@ -132,12 +228,13 @@ export default function AppCatalogPage() {
     if (!mounted) return;
     const params = new URLSearchParams();
     if (searchQuery) params.set('q', searchQuery);
-    if (selectedCategory) params.set('category', selectedCategory);
+    if (selectedCategories.length === 1) params.set('category', selectedCategories[0]);
+    else if (selectedCategories.length > 1) params.set('categories', selectedCategories.join(','));
     if (sortBy !== 'popular') params.set('sort', sortBy);
     const paramString = params.toString();
     const newUrl = paramString ? `?${paramString}` : window.location.pathname;
     window.history.replaceState(null, '', newUrl);
-  }, [mounted, searchQuery, selectedCategory, sortBy]);
+  }, [mounted, searchQuery, selectedCategories, sortBy]);
 
   // Mobile filter: focus trap + escape handler
   useEffect(() => {
@@ -212,7 +309,7 @@ export default function AppCatalogPage() {
 
   const { data: categoriesData } = useCategories();
   const { data: featuredData, isLoading: isLoadingFeatured } = usePopularPackages(5, null);
-  const { data: searchData, isLoading: isSearching, isFetching } = useSearchPackages(searchQuery, 50, selectedCategory, sortBy);
+  const { data: searchData, isLoading: isSearching, isFetching } = useSearchPackages(searchQuery, 50, null, sortBy, activeFilters);
 
   const {
     data: infiniteData,
@@ -220,7 +317,7 @@ export default function AppCatalogPage() {
     isFetchingNextPage,
     hasNextPage,
     fetchNextPage,
-  } = useInfinitePackages(20, selectedCategory, sortBy);
+  } = useInfinitePackages(20, null, sortBy, activeFilters);
   const { deployedSet } = useDeployedPackages();
   const {
     data: deploymentIntentData,
@@ -251,7 +348,7 @@ export default function AppCatalogPage() {
   );
 
   const hasSearched = searchQuery.length >= 2;
-  const isBrowseMode = !hasSearched && selectedCategory === null;
+  const isBrowseMode = !hasSearched && selectedCategories.length === 0 && !hasExtraFilters;
   const featuredPackages = featuredData?.packages || [];
   const searchPackages = searchData?.packages || [];
   const allPackages = useMemo(() => {
@@ -276,7 +373,7 @@ export default function AppCatalogPage() {
   const selectedVersions = manifestData?.versions || [];
 
   const showSearchResults = hasSearched;
-  const showCategoryResults = !hasSearched && selectedCategory !== null;
+  const showCategoryResults = !hasSearched && (selectedCategories.length > 0 || hasExtraFilters);
   const activeSortLabel = SORT_OPTIONS.find((option) => option.key === sortBy)?.label || 'Popular';
 
   const showInitialLoading = hasSearched && isSearching && searchPackages.length === 0;
@@ -313,7 +410,15 @@ export default function AppCatalogPage() {
   ]);
 
   const loadedCount = showSearchResults ? searchPackages.length : allPackages.length;
-  const activeCategoryLabel = selectedCategory ? getCategoryLabel(selectedCategory) : null;
+  const activeCategoryLabel = needsCategorization
+    ? 'Needs categorization'
+    : selectedCategories.length === 1
+    ? getCategoryLabel(selectedCategories[0])
+    : selectedCategories.length > 1
+    ? `${selectedCategories.length} categories`
+    : hasExtraFilters
+    ? 'Filtered'
+    : null;
   const collectionCategories = useMemo(() => {
     const available = categoriesData?.categories || [];
     if (available.length === 0) {
@@ -341,8 +446,8 @@ export default function AppCatalogPage() {
       return infiniteTotal;
     }
 
-    if (selectedCategory) {
-      const categoryTotal = categoriesData?.categories.find((c) => c.category === selectedCategory)?.count;
+    if (selectedCategories.length === 1) {
+      const categoryTotal = categoriesData?.categories.find((c) => c.category === selectedCategories[0])?.count;
       if (typeof categoryTotal === 'number') {
         return categoryTotal;
       }
@@ -354,7 +459,7 @@ export default function AppCatalogPage() {
     searchData?.count,
     searchPackages.length,
     infiniteData?.pages,
-    selectedCategory,
+    selectedCategories,
     categoriesData?.categories,
     categoriesData?.totalApps,
     allPackages.length,
@@ -433,10 +538,10 @@ export default function AppCatalogPage() {
     const previousState = previousBrowseControlsRef.current;
     const controlsChanged =
       previousState.sortBy !== sortBy ||
-      previousState.selectedCategory !== selectedCategory ||
+      previousState.selectedCategories.join(',') !== selectedCategories.join(',') ||
       previousState.hasSearched !== hasSearched;
 
-    previousBrowseControlsRef.current = { sortBy, selectedCategory, hasSearched };
+    previousBrowseControlsRef.current = { sortBy, selectedCategories, hasSearched };
 
     if (!mounted || !controlsChanged || selectedPackage) {
       return;
@@ -450,7 +555,7 @@ export default function AppCatalogPage() {
     const stickyOffset = 176;
     const targetTop = target.getBoundingClientRect().top + window.scrollY - stickyOffset;
     window.scrollTo({ top: Math.max(targetTop, 0), behavior: 'smooth' });
-  }, [hasSearched, mounted, selectedCategory, selectedPackage, sortBy]);
+  }, [hasSearched, mounted, selectedCategories, selectedPackage, sortBy]);
 
   const handleSelectPackage = (pkg: NormalizedPackage) => {
     setSelectedPackage(pkg);
@@ -461,12 +566,24 @@ export default function AppCatalogPage() {
   };
 
   const handleSeeAll = (category: string) => {
-    setSelectedCategory(category);
+    setNeedsCategorization(false);
+    setSelectedCategories([category]);
   };
 
-  const handleCategoryChange = (category: string | null) => {
-    setSelectedCategory(category);
+  const handleCategoryToggle = (category: string) => {
+    setNeedsCategorization(false);
+    setSelectedCategories((prev) => toggleInList(prev, category));
+  };
+
+  const handleClearCategories = () => {
+    setSelectedCategories([]);
+    setNeedsCategorization(false);
     setIsMobileFiltersOpen(false);
+  };
+
+  const handleNeedsCategorizationToggle = () => {
+    setSelectedCategories([]);
+    setNeedsCategorization((prev) => !prev);
   };
 
   const handleSortChange = (sort: 'popular' | 'name' | 'newest') => {
@@ -474,8 +591,21 @@ export default function AppCatalogPage() {
     setIsMobileFiltersOpen(false);
   };
 
+  const cycleSortBy = () => {
+    const currentIndex = SORT_OPTIONS.findIndex((option) => option.key === sortBy);
+    const next = SORT_OPTIONS[(currentIndex + 1) % SORT_OPTIONS.length];
+    setSortBy(next.key);
+  };
+
   const resetFilters = () => {
-    setSelectedCategory(null);
+    setSelectedCategories([]);
+    setNeedsCategorization(false);
+    setPublisherInput('');
+    setTagInput('');
+    setSelectedLicenseBuckets([]);
+    setSelectedSources([]);
+    setIncludeVariants(false);
+    setSelectedInstallerTypes([]);
     setSortBy('popular');
   };
 
@@ -496,6 +626,60 @@ export default function AppCatalogPage() {
     </div>
   );
 
+  const renderCheckboxRow = (
+    label: string,
+    checked: boolean,
+    onToggle: () => void,
+    count?: number
+  ) => (
+    <button
+      key={label}
+      onClick={onToggle}
+      className={`w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${
+        checked
+          ? 'bg-accent-cyan/10 text-accent-cyan border border-accent-cyan/25'
+          : 'text-text-secondary hover:text-text-primary hover:bg-bg-surface border border-transparent'
+      }`}
+    >
+      <span className="inline-flex items-center gap-2">
+        <span
+          className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 ${
+            checked ? 'bg-accent-cyan border-accent-cyan' : 'border-overlay/20'
+          }`}
+        >
+          {checked && <Check className="w-3 h-3 text-white" />}
+        </span>
+        {label}
+      </span>
+      {typeof count === 'number' && <span className="text-xs">{count}</span>}
+    </button>
+  );
+
+  const renderCollapsibleSection = (
+    key: keyof typeof openFilterSections,
+    title: string,
+    activeCount: number,
+    content: ReactNode
+  ) => (
+    <div className="border-t border-overlay/10 pt-3 space-y-2">
+      <button
+        onClick={() => toggleFilterSection(key)}
+        className="w-full flex items-center justify-between text-sm font-medium text-text-primary"
+      >
+        <span className="inline-flex items-center gap-2">
+          <T>{title}</T>
+          {activeCount > 0 && (
+            <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-accent-cyan/15 text-accent-cyan text-[10px] font-semibold">
+              {activeCount}
+            </span>
+          )}
+        </span>
+        {openFilterSections[key] ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+      </button>
+      {openFilterSections[key] && content}
+    </div>
+  );
+
   const renderFilterPanel = () => (
     <div className="rounded-2xl border border-overlay/10 bg-bg-elevated p-4 shadow-soft space-y-4">
       <div className="flex items-center justify-between">
@@ -503,7 +687,7 @@ export default function AppCatalogPage() {
           <SlidersHorizontal className="w-4 h-4 text-accent-cyan" />
           <h3 className="text-sm font-semibold tracking-wide text-text-primary uppercase"><T>Filters</T></h3>
         </div>
-        {(selectedCategory !== null || sortBy !== 'popular') && (
+        {(selectedCategories.length > 0 || hasExtraFilters || sortBy !== 'popular') && (
           <button
             onClick={resetFilters}
             className="text-xs font-medium text-text-secondary hover:text-text-primary transition-colors"
@@ -549,15 +733,22 @@ export default function AppCatalogPage() {
           onClick={() => setIsCategoriesSectionOpen((prev) => !prev)}
           className="w-full flex items-center justify-between text-sm font-medium text-text-primary"
         >
-          <span><T>Categories</T></span>
+          <span className="inline-flex items-center gap-2">
+            <T>Categories</T>
+            {selectedCategories.length > 0 && (
+              <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-accent-cyan/15 text-accent-cyan text-[10px] font-semibold">
+                {selectedCategories.length}
+              </span>
+            )}
+          </span>
           {isCategoriesSectionOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
         </button>
         {isCategoriesSectionOpen && (
-          <div className="max-h-[380px] overflow-y-auto pr-1 space-y-1">
+          <div className="max-h-[380px] overflow-y-auto scrollbar-hide pr-1 space-y-1">
             <button
-              onClick={() => handleCategoryChange(null)}
+              onClick={handleClearCategories}
               className={`w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${
-                selectedCategory === null
+                selectedCategories.length === 0 && !needsCategorization
                   ? 'bg-accent-cyan/10 text-accent-cyan border border-accent-cyan/25'
                   : 'text-text-secondary hover:text-text-primary hover:bg-bg-surface border border-transparent'
               }`}
@@ -566,21 +757,93 @@ export default function AppCatalogPage() {
               <span className="text-xs">{categoriesData?.totalApps ?? 0}</span>
             </button>
 
-            {(categoriesData?.categories || []).map((cat) => (
-              <button
-                key={cat.category}
-                onClick={() => handleCategoryChange(cat.category)}
-                className={`w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${
-                  selectedCategory === cat.category
-                    ? 'bg-accent-cyan/10 text-accent-cyan border border-accent-cyan/25'
-                    : 'text-text-secondary hover:text-text-primary hover:bg-bg-surface border border-transparent'
-                }`}
-              >
-                <span>{getCategoryLabel(cat.category)}</span>
-                <span className="text-xs">{cat.count}</span>
-              </button>
-            ))}
+            {renderCheckboxRow(
+              'Needs categorization',
+              needsCategorization,
+              handleNeedsCategorizationToggle,
+              categoriesData?.uncategorizedCount
+            )}
+
+            {(categoriesData?.categories || []).map((cat) =>
+              renderCheckboxRow(
+                getCategoryLabel(cat.category),
+                selectedCategories.includes(cat.category),
+                () => handleCategoryToggle(cat.category),
+                cat.count
+              )
+            )}
           </div>
+        )}
+      </div>
+
+      {renderCollapsibleSection(
+        'publisher',
+        'Publisher',
+        publisherInput.trim() ? 1 : 0,
+        <input
+          type="text"
+          value={publisherInput}
+          onChange={(e) => setPublisherInput(e.target.value)}
+          placeholder="e.g. Microsoft, Google"
+          className="w-full px-3 py-2 rounded-lg text-sm bg-bg-surface border border-overlay/10 text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-accent-cyan/40"
+        />
+      )}
+
+      {renderCollapsibleSection(
+        'tag',
+        'Tag search',
+        tagInput.trim() ? 1 : 0,
+        <input
+          type="text"
+          value={tagInput}
+          onChange={(e) => setTagInput(e.target.value)}
+          placeholder="e.g. browser, pdf, vpn"
+          className="w-full px-3 py-2 rounded-lg text-sm bg-bg-surface border border-overlay/10 text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-accent-cyan/40"
+        />
+      )}
+
+      {renderCollapsibleSection(
+        'license',
+        'License',
+        selectedLicenseBuckets.length,
+        <div className="space-y-1">
+          {LICENSE_OPTIONS.map((opt) =>
+            renderCheckboxRow(opt.label, selectedLicenseBuckets.includes(opt.key), () =>
+              setSelectedLicenseBuckets((prev) => toggleInList(prev, opt.key))
+            )
+          )}
+        </div>
+      )}
+
+      {renderCollapsibleSection(
+        'source',
+        'Install source',
+        selectedSources.length,
+        <div className="space-y-1">
+          {SOURCE_OPTIONS.map((opt) =>
+            renderCheckboxRow(opt.label, selectedSources.includes(opt.key), () =>
+              setSelectedSources((prev) => toggleInList(prev, opt.key))
+            )
+          )}
+        </div>
+      )}
+
+      {renderCollapsibleSection(
+        'installerType',
+        'Installer type',
+        selectedInstallerTypes.length,
+        <div className="max-h-[260px] overflow-y-auto scrollbar-hide pr-1 space-y-1">
+          {INSTALLER_TYPE_OPTIONS.map((opt) =>
+            renderCheckboxRow(opt.label, selectedInstallerTypes.includes(opt.key), () =>
+              setSelectedInstallerTypes((prev) => toggleInList(prev, opt.key))
+            )
+          )}
+        </div>
+      )}
+
+      <div className="border-t border-overlay/10 pt-3">
+        {renderCheckboxRow('Show locale-variant packages', includeVariants, () =>
+          setIncludeVariants((prev) => !prev)
         )}
       </div>
     </div>
@@ -762,18 +1025,28 @@ export default function AppCatalogPage() {
               </span>
 
               {!showSearchResults && (
-                <span className="hidden lg:inline-flex items-center gap-2 rounded-lg border border-overlay/10 bg-bg-surface px-3 py-1.5 text-sm text-text-secondary">
+                <button
+                  type="button"
+                  onClick={cycleSortBy}
+                  title="Click to change sort"
+                  className="hidden lg:inline-flex items-center gap-2 rounded-lg border border-overlay/10 bg-bg-surface px-3 py-1.5 text-sm text-text-secondary hover:text-text-primary hover:bg-overlay/5 transition-colors"
+                >
                   <ArrowUpDown className="w-4 h-4 text-accent-cyan" />
                   <T>Sort</T> <span className="font-medium text-text-primary">{activeSortLabel}</span>
-                </span>
+                </button>
               )}
 
               {!showSearchResults && (
-                <span className="inline-flex items-center gap-2 rounded-lg border border-overlay/10 bg-bg-surface px-3 py-1.5 text-sm text-text-secondary">
+                <button
+                  type="button"
+                  onClick={() => setIsMobileFiltersOpen(true)}
+                  title="Open filters"
+                  className="inline-flex items-center gap-2 rounded-lg border border-overlay/10 bg-bg-surface px-3 py-1.5 text-sm text-text-secondary hover:text-text-primary hover:bg-overlay/5 transition-colors"
+                >
                   <Package className="w-4 h-4 text-accent-cyan" />
                   <T>Showing</T> <span className="font-medium text-text-primary">{loadedCount}</span> <T>of</T>{' '}
                   <span className="font-medium text-text-primary">{totalAvailableCount}</span>
-                </span>
+                </button>
               )}
             </div>
           </div>
@@ -837,7 +1110,7 @@ export default function AppCatalogPage() {
                 <T>Clear Search</T>
               </button>
               <button
-                onClick={() => { setSearchQuery(''); setSelectedCategory(null); }}
+                onClick={() => { setSearchQuery(''); handleClearCategories(); }}
                 className="px-4 py-2 text-sm font-medium text-white bg-accent-cyan hover:bg-accent-cyan-dim rounded-lg border-0 transition-colors"
               >
                 <T>Browse All</T>
@@ -848,7 +1121,7 @@ export default function AppCatalogPage() {
       ) : (
         <>
           <div className="grid gap-6 lg:grid-cols-[280px_minmax(0,1fr)]">
-            <aside className="hidden lg:block lg:sticky lg:top-[5.25rem] self-start">
+            <aside className="hidden lg:block lg:sticky lg:top-[5.25rem] self-start lg:max-h-[calc(100vh-6rem)] lg:overflow-y-auto scrollbar-hide">
               {renderFilterPanel()}
             </aside>
 
@@ -858,7 +1131,7 @@ export default function AppCatalogPage() {
                 {showCategoryResults && (
                   <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 text-sm">
                     <button
-                      onClick={() => setSelectedCategory(null)}
+                      onClick={resetFilters}
                       className="text-text-secondary hover:text-accent-cyan transition-colors"
                     >
                       <T>App Catalog</T>
@@ -980,7 +1253,7 @@ export default function AppCatalogPage() {
                     <X className="w-4 h-4" />
                   </button>
                 </div>
-                <div className="p-4 overflow-y-auto">
+                <div className="flex-1 min-h-0 p-4 overflow-y-auto scrollbar-hide">
                   {renderFilterPanel()}
                 </div>
               </div>

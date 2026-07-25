@@ -31,6 +31,7 @@ import { createReadStream, createWriteStream } from 'node:fs';
 import { mkdir, writeFile, stat, rm } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 export const SCHEMA_VERSION = 1;
 
@@ -39,6 +40,7 @@ const CURATED_COLUMNS = [
   'homepage', 'license', 'popularity_rank', 'category', 'subcategory', 'tags',
   'icon_path', 'has_icon', 'is_verified', 'is_locale_variant',
   'parent_winget_id', 'locale_code', 'app_source', 'store_package_id', 'created_at',
+  'winget_last_update',
 ];
 const VERSION_COLUMNS = [
   'winget_id', 'version', 'installer_url', 'installer_sha256', 'installer_type',
@@ -69,6 +71,40 @@ const bool = (v) => (v ? 1 : 0);
 const jsonOrNull = (v) => (v == null ? null : JSON.stringify(v));
 
 /**
+ * Buckets a winget-manifest License field into a coarse facet for filtering.
+ * The raw values are extremely inconsistent (800+ distinct strings across
+ * 14k apps: SPDX ids, prose EULAs, bare copyright notices, typos...) so this
+ * is necessarily a heuristic, not an exact classifier. Validated against the
+ * live catalog's full distinct-license list: ~98% of populated rows land in
+ * a real bucket, the rest fall to 'unknown' rather than being guessed wrong.
+ */
+function classifyLicense(license) {
+  if (!license || !license.trim()) return 'unknown';
+  const s = license.trim();
+
+  // "Source-available" licenses that mention OSS terms in their own name
+  // (e.g. "...MIT Future License") but are NOT OSI open source - must be
+  // checked before the open-source patterns below or they'd false-positive.
+  if (/business source license|\bbusl\b|elastic[\s-]?license|elastic-\d|server side public license|\bsspl\b|polyform|fair source|fair core license|\bfsl-|functional source license|commons clause/i.test(s)) {
+    return 'proprietary';
+  }
+
+  if (/\bmit\b|\bgpl\b|\bgplv?\d|general public licen[cs]e|\bagpl\b|\bagplv?\d|\blgpl\b|\blgplv?\d|\bbsd\b|0bsd|\bapache\b|\bmpl\b|\bmplv?\d|mozilla public license|\bisc\b|\bzlib\b|libpng|\bunlicense\b|\bcc0\b|creative commons zero|public domain|\bwtfpl\b|\bepl\b|eclipse public license|\beupl\b|european union public licen[cs]e|\bpsf\b|python software foundation|\bgnu\b|boost software license|bsl-1\.0|\bx11 license\b|artistic licen[cs]e|artistic-\d|\bosl\b|\bcpal\b|\bcpl\b|\bnposl\b|blueoak|\bupl\b|mulan|\bms-pl\b|\bms-rl\b|microsoft public license|microsoft reciprocal license|php license/i.test(s)) {
+    return 'open-source';
+  }
+
+  if (/\bfreeware\b|\bfreemium\b|donationware|cardware|free for personal|free for non-commercial|non-?commercial|creative commons|\bcc[\s-]?by\b|no-fee terms/i.test(s)) {
+    return 'freeware';
+  }
+
+  if (/proprietary|commercial|\beula\b|end user license|license agreement|all rights reserved|copyright|closed source|\btrial\b|trialware|shareware|©|\(c\)/i.test(s)) {
+    return 'proprietary';
+  }
+
+  return 'unknown';
+}
+
+/**
  * Build the SQLite snapshot file at dbPath from in-memory rows. Pure and
  * deterministic given the inputs, so the self-test can exercise it offline.
  */
@@ -83,12 +119,14 @@ export function buildSqlite(dbPath, { curatedApps, versionHistory, sccmMappings 
         popularity_rank INTEGER, category TEXT, subcategory TEXT, tags TEXT,
         icon_path TEXT, has_icon INTEGER, is_verified INTEGER, is_locale_variant INTEGER,
         parent_winget_id TEXT, locale_code TEXT, app_source TEXT, store_package_id TEXT,
-        created_at TEXT
+        created_at TEXT, winget_last_update TEXT, license_bucket TEXT
       );
       CREATE INDEX idx_curated_winget ON curated_apps(winget_id);
       CREATE INDEX idx_curated_winget_nocase ON curated_apps(winget_id COLLATE NOCASE);
       CREATE INDEX idx_curated_popular ON curated_apps(is_verified, is_locale_variant, popularity_rank);
       CREATE INDEX idx_curated_category ON curated_apps(category);
+      CREATE INDEX idx_curated_last_update ON curated_apps(winget_last_update);
+      CREATE INDEX idx_curated_license_bucket ON curated_apps(license_bucket);
 
       CREATE VIRTUAL TABLE curated_fts USING fts5(name, publisher, description, tags);
 
@@ -111,10 +149,12 @@ export function buildSqlite(dbPath, { curatedApps, versionHistory, sccmMappings 
     const insCurated = db.prepare(`INSERT INTO curated_apps
       (id, winget_id, name, publisher, latest_version, description, homepage, license,
        popularity_rank, category, subcategory, tags, icon_path, has_icon, is_verified,
-       is_locale_variant, parent_winget_id, locale_code, app_source, store_package_id, created_at)
+       is_locale_variant, parent_winget_id, locale_code, app_source, store_package_id, created_at,
+       winget_last_update, license_bucket)
       VALUES (@id,@winget_id,@name,@publisher,@latest_version,@description,@homepage,@license,
        @popularity_rank,@category,@subcategory,@tags,@icon_path,@has_icon,@is_verified,
-       @is_locale_variant,@parent_winget_id,@locale_code,@app_source,@store_package_id,@created_at)`);
+       @is_locale_variant,@parent_winget_id,@locale_code,@app_source,@store_package_id,@created_at,
+       @winget_last_update,@license_bucket)`);
     // Standalone FTS5 table; rowid mirrors curated_apps.id so search joins back.
     const insFts = db.prepare(`INSERT INTO curated_fts (rowid, name, publisher, description, tags)
       VALUES (@id, @name, @publisher, @description, @tags)`);
@@ -142,6 +182,8 @@ export function buildSqlite(dbPath, { curatedApps, versionHistory, sccmMappings 
           is_locale_variant: bool(a.is_locale_variant), parent_winget_id: a.parent_winget_id ?? null,
           locale_code: a.locale_code ?? null, app_source: a.app_source ?? null,
           store_package_id: a.store_package_id ?? null, created_at: a.created_at ?? null,
+          winget_last_update: a.winget_last_update ?? null,
+          license_bucket: classifyLicense(a.license),
         });
         insFts.run({
           id: a.id, name: a.name ?? '', publisher: a.publisher ?? '',
@@ -241,8 +283,8 @@ async function selfTest() {
   const os = await import('node:os');
   const outDir = path.join(os.tmpdir(), `catalog-snapshot-selftest-${process.pid}`);
   const curatedApps = [
-    { id: 1, winget_id: 'Google.Chrome', name: 'Google Chrome', publisher: 'Google LLC', latest_version: '120.0', description: 'Fast web browser', homepage: 'https://google.com', tags: ['browser', 'web'], category: 'Browsers', is_verified: true, is_locale_variant: false, popularity_rank: 1, app_source: 'winget', has_icon: true },
-    { id: 2, winget_id: 'Mozilla.Firefox', name: 'Mozilla Firefox', publisher: 'Mozilla', latest_version: '121.0', description: 'Open source browser', tags: ['browser'], category: 'Browsers', is_verified: true, is_locale_variant: false, popularity_rank: 2 },
+    { id: 1, winget_id: 'Google.Chrome', name: 'Google Chrome', publisher: 'Google LLC', latest_version: '120.0', description: 'Fast web browser', homepage: 'https://google.com', license: 'Proprietary', tags: ['browser', 'web'], category: 'Browsers', is_verified: true, is_locale_variant: false, popularity_rank: 1, app_source: 'winget', has_icon: true, winget_last_update: '2026-06-01T00:00:00Z' },
+    { id: 2, winget_id: 'Mozilla.Firefox', name: 'Mozilla Firefox', publisher: 'Mozilla', latest_version: '121.0', description: 'Open source browser', license: 'MPL-2.0', tags: ['browser'], category: 'Browsers', is_verified: true, is_locale_variant: false, popularity_rank: 2 },
     { id: 3, winget_id: 'Zoom.Zoom', name: 'Zoom Workplace', publisher: 'Zoom', latest_version: '6.0', tags: null, category: 'Communication', is_verified: true, is_locale_variant: false, popularity_rank: 5 },
   ];
   const versionHistory = [
@@ -270,8 +312,21 @@ async function selfTest() {
   assert(popular[0].winget_id === 'Google.Chrome', 'popular ordering by popularity_rank');
 
   // tags round-trip as JSON
-  const chrome = db.prepare(`SELECT tags FROM curated_apps WHERE winget_id=?`).get('Google.Chrome');
+  const chrome = db.prepare(`SELECT tags, winget_last_update FROM curated_apps WHERE winget_id=?`).get('Google.Chrome');
   assert(JSON.stringify(JSON.parse(chrome.tags)) === JSON.stringify(['browser', 'web']), 'tags JSON round-trip');
+  assert(chrome.winget_last_update === '2026-06-01T00:00:00Z', 'winget_last_update round-trip');
+
+  // newest-first ordering by winget_last_update (nulls last)
+  const newest = db.prepare(
+    `SELECT winget_id FROM curated_apps WHERE is_verified=1 AND is_locale_variant=0 ORDER BY winget_last_update IS NULL, winget_last_update DESC LIMIT 1`
+  ).all();
+  assert(newest[0].winget_id === 'Google.Chrome', 'newest ordering by winget_last_update');
+
+  // license bucketing: Proprietary -> 'proprietary', MPL-2.0 -> 'open-source', missing -> 'unknown'
+  const licenseBuckets = db.prepare(`SELECT winget_id, license_bucket FROM curated_apps ORDER BY id`).all();
+  assert(licenseBuckets[0].license_bucket === 'proprietary', 'Chrome license bucketed as proprietary');
+  assert(licenseBuckets[1].license_bucket === 'open-source', 'Firefox license bucketed as open-source');
+  assert(licenseBuckets[2].license_bucket === 'unknown', 'Zoom (no license) bucketed as unknown');
 
   // installer info + installers JSON
   const vh = db.prepare(`SELECT installer_url, installers FROM version_history WHERE winget_id=? AND version=?`).get('Google.Chrome', '120.0');
@@ -293,7 +348,7 @@ async function selfTest() {
   console.log('SELF-TEST PASSED. manifest:', JSON.stringify(manifest.counts));
 }
 
-const isMain = import.meta.url === `file://${process.argv[1]}`;
+const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
   const outDir = process.env.SNAPSHOT_OUT_DIR || './snapshot';
   const run = process.argv.includes('--self-test') ? selfTest() : exportFromSupabase(outDir).then(({ manifest }) => {

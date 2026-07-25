@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getCatalogSource } from '@/lib/catalog';
+import type { CatalogFilterOptions } from '@/lib/catalog/types';
+import { parseCatalogFilters } from '@/lib/catalog/filter-params';
 
 export const fetchCache = 'force-no-store';
 
@@ -19,6 +21,8 @@ interface CuratedAppResult {
   rank: number;
   app_source: string | null;
   store_package_id: string | null;
+  winget_last_update?: string | null;
+  license_bucket?: string | null;
 }
 
 // Search curated apps
@@ -26,11 +30,12 @@ async function searchCachedPackages(
   query: string,
   limit: number,
   category?: string | null,
-  sort: string = 'popular'
+  sort: string = 'popular',
+  filters?: CatalogFilterOptions
 ) {
   const { data: curatedData, error: curatedError } = await getCatalogSource().searchApps(
     query,
-    { limit, category: category || null }
+    { limit, category: category || null, filters }
   );
 
   if (curatedError) {
@@ -44,8 +49,11 @@ async function searchCachedPackages(
     if (sort === 'name') {
       results = results.sort((a, b) => a.name.localeCompare(b.name));
     } else if (sort === 'newest') {
-      // newest first by id (higher id = newer entry)
-      results = results.sort((a, b) => b.id - a.id);
+      results = results.sort((a, b) => {
+        const aTime = a.winget_last_update ? Date.parse(a.winget_last_update) : -Infinity;
+        const bTime = b.winget_last_update ? Date.parse(b.winget_last_update) : -Infinity;
+        return bTime - aTime;
+      });
     }
     // 'popular' keeps the RPC's default relevance + popularity ordering
 
@@ -77,13 +85,15 @@ export async function GET(request: NextRequest) {
     }
 
     const sanitizedLimit = Math.min(limit, 100);
+    const filters = parseCatalogFilters(searchParams);
 
     // Try curated apps search first
     const cachedResults = await searchCachedPackages(
       query,
       sanitizedLimit,
       category,
-      sort
+      sort,
+      filters
     );
 
     if (cachedResults && cachedResults.data.length > 0) {
@@ -105,6 +115,8 @@ export async function GET(request: NextRequest) {
           installerType: p.installer_type,
           appSource: p.app_source === 'store' ? 'store' : p.app_source === 'chocolatey' ? 'chocolatey' : 'win32',
           packageIdentifier: p.store_package_id || undefined,
+          lastUpdated: p.winget_last_update || undefined,
+          licenseBucket: p.license_bucket || undefined,
         })),
         source: 'curated',
       }, {

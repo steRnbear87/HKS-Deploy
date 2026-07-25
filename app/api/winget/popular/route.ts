@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getCatalogSource } from '@/lib/catalog';
+import { parseCatalogFilters } from '@/lib/catalog/filter-params';
 
 export const fetchCache = 'force-no-store';
 
@@ -22,12 +23,14 @@ export async function GET(request: NextRequest) {
     const sanitizedOffset = Number.isFinite(requestedOffset)
       ? Math.max(requestedOffset, 0)
       : 0;
+    const filters = parseCatalogFilters(searchParams);
 
     const result = await getCatalogSource().getPopularApps({
       limit: sanitizedLimit,
       offset: sanitizedOffset,
       category,
       sort,
+      filters,
     });
 
     if (!result) {
@@ -50,6 +53,8 @@ export async function GET(request: NextRequest) {
       popularityRank: p.popularity_rank,
       appSource: p.app_source === 'store' ? 'store' : p.app_source === 'chocolatey' ? 'chocolatey' : 'win32',
       packageIdentifier: p.store_package_id || undefined,
+      lastUpdated: p.winget_last_update || undefined,
+      licenseBucket: p.license_bucket || undefined,
     }));
 
     return NextResponse.json({

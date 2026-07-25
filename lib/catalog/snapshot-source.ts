@@ -20,6 +20,7 @@ import type { LocaleVariant } from '@/types/winget';
 import type { CuratedAppMatch } from '@/lib/app-mappings';
 import type { InstallationSnapshot } from '@/lib/winget-api';
 import type {
+  CatalogFilterOptions,
   CatalogSource,
   CategoryCount,
   CuratedAppRpcRow,
@@ -72,6 +73,8 @@ interface CuratedAppDbRow {
   popularity_rank: number | null;
   app_source: string | null;
   store_package_id: string | null;
+  winget_last_update: string | null;
+  license_bucket: string | null;
 }
 
 function parseTags(tags: string | null): string[] | null {
@@ -101,6 +104,8 @@ function toRpcRow(r: CuratedAppDbRow): CuratedAppRpcRow {
     installer_type: null,
     app_source: r.app_source,
     store_package_id: r.store_package_id,
+    winget_last_update: r.winget_last_update,
+    license_bucket: r.license_bucket as CuratedAppRpcRow['license_bucket'],
   };
 }
 
@@ -119,11 +124,81 @@ function toPopularRow(r: CuratedAppDbRow): PopularCuratedAppRow {
     popularity_rank: r.popularity_rank,
     app_source: r.app_source,
     store_package_id: r.store_package_id,
+    winget_last_update: r.winget_last_update,
+    license_bucket: r.license_bucket as PopularCuratedAppRow['license_bucket'],
   };
 }
 
 const CURATED_RPC_COLUMNS =
-  'id, winget_id, name, publisher, latest_version, description, homepage, category, tags, icon_path, popularity_rank, app_source, store_package_id';
+  'id, winget_id, name, publisher, latest_version, description, homepage, category, tags, icon_path, popularity_rank, app_source, store_package_id, winget_last_update, license_bucket';
+
+/**
+ * Shared WHERE-clause + JOIN builder for the new facet filters, used by both
+ * searchApps and getPopularApps so the two query paths stay in sync. `alias`
+ * must match the FROM-clause alias for curated_apps in the calling query.
+ */
+function buildFilterConditions(
+  filters: CatalogFilterOptions | undefined,
+  alias: string
+): { conditions: string[]; params: Record<string, unknown>; joinClause: string } {
+  const f = filters || {};
+  const conditions: string[] = [];
+  const params: Record<string, unknown> = {};
+  const col = (name: string) => `${alias}.${name}`;
+
+  if (f.includeLocaleVariants !== true) {
+    conditions.push(`${col('is_locale_variant')} = 0`);
+  }
+
+  if (f.needsCategorization) {
+    conditions.push(`${col('category')} IS NULL`);
+  } else if (f.categories && f.categories.length > 0) {
+    f.categories.forEach((c, i) => {
+      params[`cat${i}`] = c;
+    });
+    conditions.push(`${col('category')} IN (${f.categories.map((_, i) => `@cat${i}`).join(', ')})`);
+  }
+
+  if (f.publisher) {
+    params.publisherFilter = `%${f.publisher}%`;
+    conditions.push(`${col('publisher')} LIKE @publisherFilter`);
+  }
+
+  if (f.tag) {
+    params.tagFilter = `%${f.tag}%`;
+    conditions.push(`${col('tags')} LIKE @tagFilter`);
+  }
+
+  if (f.licenseBuckets && f.licenseBuckets.length > 0) {
+    f.licenseBuckets.forEach((b, i) => {
+      params[`lb${i}`] = b;
+    });
+    conditions.push(
+      `${col('license_bucket')} IN (${f.licenseBuckets.map((_, i) => `@lb${i}`).join(', ')})`
+    );
+  }
+
+  if (f.appSources && f.appSources.length > 0) {
+    f.appSources.forEach((s, i) => {
+      params[`src${i}`] = s;
+    });
+    conditions.push(`${col('app_source')} IN (${f.appSources.map((_, i) => `@src${i}`).join(', ')})`);
+  }
+
+  // installer_type lives on version_history, not curated_apps, and only the
+  // latest version's installer matters for this facet - join on the exact
+  // (winget_id, latest_version) pair rather than any historical version.
+  let joinClause = '';
+  if (f.installerTypes && f.installerTypes.length > 0) {
+    joinClause = `JOIN version_history vh ON vh.winget_id = ${col('winget_id')} AND vh.version = ${col('latest_version')}`;
+    f.installerTypes.forEach((t, i) => {
+      params[`it${i}`] = t;
+    });
+    conditions.push(`vh.installer_type IN (${f.installerTypes.map((_, i) => `@it${i}`).join(', ')})`);
+  }
+
+  return { conditions, params, joinClause };
+}
 
 /**
  * Build a safe FTS5 MATCH expression from user input. Splits into terms,
@@ -147,7 +222,12 @@ export class SnapshotCatalogSource implements CatalogSource {
 
   async searchApps(
     query: string,
-    opts: { limit: number; category?: string | null; sort?: SearchSort }
+    opts: {
+      limit: number;
+      category?: string | null;
+      sort?: SearchSort;
+      filters?: CatalogFilterOptions;
+    }
   ): Promise<{ data: CuratedAppRpcRow[] | null; error: { message: string } | null }> {
     return withDb<{ data: CuratedAppRpcRow[] | null; error: { message: string } | null }>(
       (db) => {
@@ -155,12 +235,15 @@ export class SnapshotCatalogSource implements CatalogSource {
         const limit = opts.limit;
         const ftsMatch = buildFtsMatch(query);
 
-        const categoryClause = category ? 'AND ca.category = @category' : '';
-        const params: Record<string, unknown> = {
-          q: query,
-          limit,
-          ...(category ? { category } : {}),
+        // Legacy single-category param still works when the new multi-select
+        // categories filter isn't supplied.
+        const filters: CatalogFilterOptions = {
+          ...opts.filters,
+          categories: opts.filters?.categories?.length ? opts.filters.categories : category ? [category] : null,
         };
+        const { conditions, params: filterParams, joinClause } = buildFilterConditions(filters, 'ca');
+        const extraClause = conditions.length > 0 ? `AND ${conditions.join(' AND ')}` : '';
+        const params: Record<string, unknown> = { q: query, limit, ...filterParams };
 
         let rows: CuratedAppDbRow[] = [];
 
@@ -170,10 +253,10 @@ export class SnapshotCatalogSource implements CatalogSource {
             SELECT ${CURATED_RPC_COLUMNS.split(', ').map((c) => `ca.${c}`).join(', ')}
             FROM curated_fts f
             JOIN curated_apps ca ON ca.id = f.rowid
+            ${joinClause}
             WHERE curated_fts MATCH @match
               AND ca.is_verified = 1
-              AND ca.is_locale_variant = 0
-              ${categoryClause}
+              ${extraClause}
             ORDER BY
               CASE
                 WHEN lower(ca.name) = lower(@q) OR lower(ca.winget_id) = lower(@q) OR ca.winget_id LIKE '%.' || @q THEN 0
@@ -198,11 +281,11 @@ export class SnapshotCatalogSource implements CatalogSource {
         // ILIKE fallback when FTS returns nothing (or was skipped).
         if (rows.length === 0) {
           const fallbackSql = `
-            SELECT ${CURATED_RPC_COLUMNS}
+            SELECT ${CURATED_RPC_COLUMNS.split(', ').map((c) => `ca.${c}`).join(', ')}
             FROM curated_apps ca
+            ${joinClause}
             WHERE ca.is_verified = 1
-              AND ca.is_locale_variant = 0
-              ${categoryClause}
+              ${extraClause}
               AND (
                 ca.name LIKE '%' || @q || '%'
                 OR ca.publisher LIKE '%' || @q || '%'
@@ -220,8 +303,6 @@ export class SnapshotCatalogSource implements CatalogSource {
               ca.popularity_rank ASC
             LIMIT @limit
           `;
-          // The fallback selects ca.* columns without the join alias on FTS;
-          // re-key params so prepared statement names resolve.
           rows = db.prepare(fallbackSql).all(params) as CuratedAppDbRow[];
         }
 
@@ -236,43 +317,51 @@ export class SnapshotCatalogSource implements CatalogSource {
     offset: number;
     category?: string | null;
     sort: SearchSort;
+    filters?: CatalogFilterOptions;
   }): Promise<PopularPackagesResult | null> {
     return withDb(
       (db) => {
         const { limit, offset, category, sort } = opts;
-        const categoryClause = category ? 'AND category = @category' : '';
-        const baseParams: Record<string, unknown> = category ? { category } : {};
+
+        // Legacy single-category param still works when the new multi-select
+        // categories filter isn't supplied.
+        const filters: CatalogFilterOptions = {
+          ...opts.filters,
+          categories: opts.filters?.categories?.length ? opts.filters.categories : category ? [category] : null,
+        };
+        const { conditions, params: filterParams, joinClause } = buildFilterConditions(filters, 'ca');
+        const whereClause = ['ca.is_verified = 1', ...conditions].join(' AND ');
 
         const countRow = db
           .prepare(
-            `SELECT COUNT(*) AS c FROM curated_apps
-             WHERE is_verified = 1 AND is_locale_variant = 0 ${categoryClause}`
+            `SELECT COUNT(*) AS c FROM curated_apps ca ${joinClause} WHERE ${whereClause}`
           )
-          .get(baseParams) as { c: number };
+          .get(filterParams) as { c: number };
 
         let orderBy: string;
         switch (sort) {
           case 'name':
-            orderBy = 'name ASC';
+            orderBy = 'ca.name ASC';
             break;
           case 'newest':
-            orderBy = 'created_at DESC';
+            orderBy = 'ca.winget_last_update IS NULL, ca.winget_last_update DESC';
             break;
           case 'popular':
           default:
-            orderBy = 'popularity_rank IS NULL, popularity_rank ASC, name ASC';
+            orderBy = 'ca.popularity_rank IS NULL, ca.popularity_rank ASC, ca.name ASC';
             break;
         }
 
         const rows = db
           .prepare(
-            `SELECT ${CURATED_RPC_COLUMNS}
-             FROM curated_apps
-             WHERE is_verified = 1 AND is_locale_variant = 0 ${categoryClause}
+            `SELECT ${CURATED_RPC_COLUMNS.split(', ').map((c) => `ca.${c}`).join(', ')}
+             FROM curated_apps ca
+             ${joinClause}
+             WHERE ${whereClause}
              ORDER BY ${orderBy}
              LIMIT @limit OFFSET @offset`
           )
-          .all({ ...baseParams, limit, offset }) as CuratedAppDbRow[];
+          .all({ ...filterParams, limit, offset }) as CuratedAppDbRow[];
 
         return {
           data: rows.map(toPopularRow),
@@ -333,6 +422,21 @@ export class SnapshotCatalogSource implements CatalogSource {
         const where = opts.verifiedOnly ? 'WHERE is_verified = 1' : '';
         const row = db
           .prepare(`SELECT COUNT(*) AS c FROM curated_apps ${where}`)
+          .get() as { c: number };
+        return row.c ?? null;
+      },
+      () => null
+    );
+  }
+
+  async getUncategorizedCount(): Promise<number | null> {
+    return withDb(
+      (db) => {
+        const row = db
+          .prepare(
+            `SELECT COUNT(*) AS c FROM curated_apps
+             WHERE is_verified = 1 AND is_locale_variant = 0 AND category IS NULL`
+          )
           .get() as { c: number };
         return row.c ?? null;
       },
