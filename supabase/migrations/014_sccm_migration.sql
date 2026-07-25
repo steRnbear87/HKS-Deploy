@@ -459,20 +459,17 @@ LANGUAGE sql STABLE AS $$
     COUNT(*) FILTER (WHERE migration_status = 'failed') as failed_apps,
     COALESCE(SUM(deployment_count), 0) as total_deployment_count,
     COUNT(*) FILTER (WHERE is_deployed = TRUE) as deployed_apps_count,
-    jsonb_object_agg(
-      COALESCE(technology, 'Unknown'),
-      tech_count
+    (
+      SELECT jsonb_object_agg(COALESCE(tc.technology, 'Unknown'), tc.tech_count)
+      FROM (
+        SELECT technology, COUNT(*) as tech_count
+        FROM sccm_apps
+        WHERE migration_id = p_migration_id
+        GROUP BY technology
+      ) tc
     ) as technology_breakdown
   FROM sccm_apps
-  WHERE migration_id = p_migration_id
-  CROSS JOIN LATERAL (
-    SELECT technology as tech, COUNT(*) as tech_count
-    FROM sccm_apps
-    WHERE migration_id = p_migration_id
-    GROUP BY technology
-  ) tech_counts
-  GROUP BY tech_counts.tech, tech_counts.tech_count
-  LIMIT 1;
+  WHERE migration_id = p_migration_id;
 $$;
 
 -- Get SCCM mapping by name (for matching)
