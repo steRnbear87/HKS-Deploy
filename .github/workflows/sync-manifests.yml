@@ -89,8 +89,10 @@ jobs:
               }
               total = requestedIds.length;
             } else {
-              // Query count via Supabase REST API (no npm needed)
-              let url = `${SUPABASE_URL}/rest/v1/curated_apps?select=winget_id`;
+              // Query count via Supabase REST API (no npm needed). Chocolatey
+              // packages live in this same table but have no WinGet manifest
+              // to sync against, so they're excluded here.
+              let url = `${SUPABASE_URL}/rest/v1/curated_apps?select=winget_id&app_source=neq.chocolatey`;
               const res = await fetch(url, {
                 headers: {
                   'apikey': SUPABASE_KEY,
@@ -417,10 +419,15 @@ jobs:
                 return;
               }
 
-              // Fetch this shard's slice using .range()
+              // Fetch this shard's slice using .range(). Chocolatey packages
+              // live in this same table but have no WinGet manifest to sync
+              // against, so they're excluded here (see the matching filter
+              // in the plan job's count query, which this shard's offsets
+              // are computed against).
               let query = supabase
                 .from('curated_apps')
                 .select('winget_id, latest_version, description')
+                .neq('app_source', 'chocolatey')
                 .order('popularity_rank', { ascending: true, nullsFirst: false })
                 .range(appOffset, appOffset + chunkSize - 1);
 
