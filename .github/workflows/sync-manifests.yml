@@ -808,8 +808,13 @@ jobs:
           // catalog snapshot from publishing. Only a missing shard or a high
           // failure rate (a systemic problem: Supabase down, GitHub-wide rate
           // limiting) should fail this job and gate the snapshot job off.
-          const totalAttempted = totalSynced + totalFailed;
-          const failureRate = totalAttempted > 0 ? totalFailed / totalAttempted : 0;
+          // Rate is against the whole batch (synced + failed + skipped), not
+          // just the attempted subset - new_only mode can leave "attempted"
+          // tiny (a handful of not-yet-synced-today apps), where a few
+          // permanently-broken packages would otherwise look like a
+          // majority failure despite being a rounding error catalog-wide.
+          const totalInScope = totalSynced + totalFailed + totalSkipped;
+          const failureRate = totalInScope > 0 ? totalFailed / totalInScope : 0;
           const FAILURE_RATE_THRESHOLD = 0.5;
           const hardFailure = !complete || failureRate > FAILURE_RATE_THRESHOLD;
 
