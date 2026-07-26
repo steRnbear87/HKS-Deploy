@@ -191,8 +191,14 @@ export function UpdateCard({
         {/* Version comparison - redesigned as a horizontal flow */}
         <div className="flex items-center gap-2 mb-3.5 px-0.5">
           <div className="flex items-center gap-2 flex-1 min-w-0">
-            {/* Current version */}
-            <span className="px-2.5 py-1 text-[13px] font-mono bg-overlay/[0.04] text-text-secondary border border-black/[0.08] rounded-md truncate">
+            {/* Current version - this is the version HKS App Deployment last
+                packaged/deployed, not a live read of the device. Self-updating
+                apps (e.g. Claude) can drift ahead of this without Intune ever
+                knowing - see the rollout line below for live drift signal. */}
+            <span
+              className="px-2.5 py-1 text-[13px] font-mono bg-overlay/[0.04] text-text-secondary border border-black/[0.08] rounded-md truncate"
+              title="Version last packaged and deployed via HKS App Deployment - not a live read from the device. Apps that self-update can run ahead of this without Intune knowing; see rollout status below."
+            >
               {update.current_version}
             </span>
 
@@ -269,6 +275,14 @@ export function UpdateCard({
                 <>
                   {' '}&middot; {update.rollout.behind} <T>lagging</T>
                 </>
+              )}
+              {update.rollout.ahead > 0 && (
+                <span
+                  className="text-accent-cyan"
+                  title="These devices already report a newer version than what HKS App Deployment packaged - likely self-updated outside of Intune."
+                >
+                  {' '}&middot; {update.rollout.ahead} <T>already ahead</T>
+                </span>
               )}
             </span>
           )}
