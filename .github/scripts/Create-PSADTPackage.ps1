@@ -34,6 +34,14 @@ $NestedInstallerPath = $env:INPUT_NESTED_INSTALLER_PATH
 $InstallScope = if ($env:INPUT_INSTALL_SCOPE) { $env:INPUT_INSTALL_SCOPE } else { 'machine' }
 $IsUserScope = $InstallScope -eq 'user'
 
+# Sanitized for the registry marker written below - MUST exactly match
+# lib/registry-marker.ts's sanitizeMarkerVersion, which lib/detection-rules.ts
+# uses to build the Intune detection rule's comparisonValue. Diverging here
+# would make the marker's actual written value permanently disagree with
+# what Intune compares it against, breaking version-based detection.
+$MarkerVersion = $Version -replace '[^A-Za-z0-9.\-_+~]', ''
+if (-not $MarkerVersion) { $MarkerVersion = $Version }
+
 # Validate required inputs
 $requiredVars = @('INPUT_JOB_ID', 'INPUT_CALLBACK_URL', 'INPUT_DISPLAY_NAME', 'INPUT_PUBLISHER', 'INPUT_VERSION', 'INPUT_WINGET_ID', 'INPUT_INSTALLER_TYPE')
 foreach ($var in $requiredVars) {
@@ -1092,7 +1100,7 @@ if ($IsUserScope) {
         '    try {'
         '        Invoke-ADTAllUsersRegistryAction -ScriptBlock {'
         "            Set-ADTRegistryKey -LiteralPath 'HKCU\$registryMarkerPathEscaped\$sanitizedWingetId' -Name 'DisplayName' -Value '$displayNameEscaped' -Type String -SID `$_.SID"
-        "            Set-ADTRegistryKey -LiteralPath 'HKCU\$registryMarkerPathEscaped\$sanitizedWingetId' -Name 'Version' -Value '$Version' -Type String -SID `$_.SID"
+        "            Set-ADTRegistryKey -LiteralPath 'HKCU\$registryMarkerPathEscaped\$sanitizedWingetId' -Name 'Version' -Value '$MarkerVersion' -Type String -SID `$_.SID"
         "            Set-ADTRegistryKey -LiteralPath 'HKCU\$registryMarkerPathEscaped\$sanitizedWingetId' -Name 'Publisher' -Value '$publisherEscaped' -Type String -SID `$_.SID"
         "            Set-ADTRegistryKey -LiteralPath 'HKCU\$registryMarkerPathEscaped\$sanitizedWingetId' -Name 'WingetId' -Value '$WingetId' -Type String -SID `$_.SID"
         '            Set-ADTRegistryKey -LiteralPath ''HKCU\' + $registryMarkerPathEscaped + '\' + $sanitizedWingetId + ''' -Name ''InstalledDate'' -Value (Get-Date -Format ''o'') -Type String -SID $_.SID'
@@ -1110,7 +1118,7 @@ if ($IsUserScope) {
         '    try {'
         "        `$regPath = 'HKLM\$registryMarkerPathEscaped\$sanitizedWingetId'"
         "        Set-ADTRegistryKey -LiteralPath `$regPath -Name 'DisplayName' -Value '$displayNameEscaped' -Type String"
-        "        Set-ADTRegistryKey -LiteralPath `$regPath -Name 'Version' -Value '$Version' -Type String"
+        "        Set-ADTRegistryKey -LiteralPath `$regPath -Name 'Version' -Value '$MarkerVersion' -Type String"
         "        Set-ADTRegistryKey -LiteralPath `$regPath -Name 'Publisher' -Value '$publisherEscaped' -Type String"
         "        Set-ADTRegistryKey -LiteralPath `$regPath -Name 'WingetId' -Value '$WingetId' -Type String"
         '        Set-ADTRegistryKey -LiteralPath $regPath -Name ''InstalledDate'' -Value (Get-Date -Format ''o'') -Type String'

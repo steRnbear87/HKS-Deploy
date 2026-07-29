@@ -9,7 +9,7 @@ import { resolveTargetTenantId } from '@/lib/msp/tenant-resolution';
 import { checkStoredConsent } from '@/lib/msp/consent-cache';
 import { verifyTenantConsent } from '@/lib/msp/consent-verification';
 import { parseAccessToken } from '@/lib/auth-utils';
-import { getServicePrincipalToken } from '@/lib/intune/graph-client';
+import { getServicePrincipalToken, invalidateServicePrincipalToken } from '@/lib/intune/graph-client';
 
 // Matches app/api/intune/devices/[id]/logs/route.ts - deviceLogCollectionResponse
 // actions need the beta endpoint against a live tenant despite v1.0 docs.
@@ -86,6 +86,9 @@ export async function POST(
     );
 
     if (!response.ok) {
+      if (response.status === 401) {
+        invalidateServicePrincipalToken(tenantId);
+      }
       const bodyText = await response.text().catch(() => '');
       console.error('Error creating device log download URL:', bodyText);
       return NextResponse.json(

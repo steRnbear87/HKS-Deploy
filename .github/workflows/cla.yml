@@ -7,10 +7,18 @@ on:
     types: [opened, synchronize, reopened]
 
 permissions:
-  actions: write
   contents: write
   pull-requests: write
   statuses: write
+
+# Every run writes to the same shared signatures/cla.json file on main and
+# pushes directly to it - without a repo-wide (not per-PR) group, two
+# signature events landing close together can both read the file before
+# either commits, race to push, and one push silently loses the other's
+# signature.
+concurrency:
+  group: cla-signatures
+  cancel-in-progress: false
 
 jobs:
   cla-check:

@@ -9,7 +9,7 @@ import { resolveTargetTenantId } from '@/lib/msp/tenant-resolution';
 import { checkStoredConsent } from '@/lib/msp/consent-cache';
 import { verifyTenantConsent } from '@/lib/msp/consent-verification';
 import { parseAccessToken } from '@/lib/auth-utils';
-import { getServicePrincipalToken } from '@/lib/intune/graph-client';
+import { getServicePrincipalToken, invalidateServicePrincipalToken, fetchWithRetry } from '@/lib/intune/graph-client';
 import type { IntuneAppWithAssignments, IntuneAppAssignment } from '@/types/inventory';
 
 const GRAPH_API_BASE = 'https://graph.microsoft.com/beta';
@@ -90,21 +90,24 @@ export async function GET(
 
     // Fetch app details and assignments in parallel
     const [appResponse, assignmentsResponse] = await Promise.all([
-      fetch(`${GRAPH_API_BASE}/deviceAppManagement/mobileApps/${id}`, {
+      fetchWithRetry(`${GRAPH_API_BASE}/deviceAppManagement/mobileApps/${id}`, {
         headers: {
           Authorization: `Bearer ${graphToken}`,
           'Content-Type': 'application/json',
         },
-      }),
-      fetch(`${GRAPH_API_BASE}/deviceAppManagement/mobileApps/${id}/assignments`, {
+      }, 3),
+      fetchWithRetry(`${GRAPH_API_BASE}/deviceAppManagement/mobileApps/${id}/assignments`, {
         headers: {
           Authorization: `Bearer ${graphToken}`,
           'Content-Type': 'application/json',
         },
-      }),
+      }, 3),
     ]);
 
     if (!appResponse.ok) {
+      if (appResponse.status === 401) {
+        invalidateServicePrincipalToken(tenantId);
+      }
       if (appResponse.status === 404) {
         return NextResponse.json(
           { error: 'App not found' },

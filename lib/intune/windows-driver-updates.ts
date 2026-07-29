@@ -12,7 +12,7 @@
  * only ever affects that one device in practice.
  */
 
-import { fetchWithRetry } from './graph-client';
+import { fetchWithRetry, fetchAllGraphPages } from './graph-client';
 import type { DriverUpdateProfile, DriverInventoryItem } from '@/types/windows-updates';
 import type { AssignmentTarget } from '@/types/intune';
 
@@ -45,16 +45,12 @@ function toDriverInventoryItem(raw: Record<string, unknown>): DriverInventoryIte
 }
 
 export async function listDriverUpdateProfiles(token: string): Promise<DriverUpdateProfile[]> {
-  const response = await fetchWithRetry(`${GRAPH_API_BASE_BETA}/${RESOURCE}`, {
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-  }, 3);
-
-  if (!response.ok) {
-    throw new Error(`Failed to list driver update profiles: ${response.status}`);
-  }
-
-  const data: { value?: Array<Record<string, unknown>> } = await response.json();
-  return (data.value || []).map(toDriverUpdateProfile);
+  const rows = await fetchAllGraphPages<Record<string, unknown>>(
+    `${GRAPH_API_BASE_BETA}/${RESOURCE}`,
+    token,
+    'Failed to list driver update profiles'
+  );
+  return rows.map(toDriverUpdateProfile);
 }
 
 export async function getDriverUpdateProfile(token: string, profileId: string): Promise<DriverUpdateProfile> {
@@ -131,31 +127,21 @@ export async function listDriverUpdateProfileAssignments(
   token: string,
   profileId: string
 ): Promise<AssignmentTarget[]> {
-  const response = await fetchWithRetry(`${GRAPH_API_BASE_BETA}/${RESOURCE}/${profileId}/assignments`, {
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-  }, 3);
-
-  if (!response.ok) {
-    throw new Error(`Failed to list assignments for driver update profile ${profileId}: ${response.status}`);
-  }
-
-  const data: { value?: Array<{ target: AssignmentTarget }> } = await response.json();
-  return (data.value || []).map((a) => a.target);
+  const rows = await fetchAllGraphPages<{ target: AssignmentTarget }>(
+    `${GRAPH_API_BASE_BETA}/${RESOURCE}/${profileId}/assignments`,
+    token,
+    `Failed to list assignments for driver update profile ${profileId}`
+  );
+  return rows.map((a) => a.target);
 }
 
 export async function listDriverInventory(token: string, profileId: string): Promise<DriverInventoryItem[]> {
-  const response = await fetchWithRetry(
+  const rows = await fetchAllGraphPages<Record<string, unknown>>(
     `${GRAPH_API_BASE_BETA}/${RESOURCE}/${profileId}/driverInventories`,
-    { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } },
-    3
+    token,
+    `Failed to list driver inventory for profile ${profileId}`
   );
-
-  if (!response.ok) {
-    throw new Error(`Failed to list driver inventory for profile ${profileId}: ${response.status}`);
-  }
-
-  const data: { value?: Array<Record<string, unknown>> } = await response.json();
-  return (data.value || []).map(toDriverInventoryItem);
+  return rows.map(toDriverInventoryItem);
 }
 
 export async function setDriverApprovalStatus(

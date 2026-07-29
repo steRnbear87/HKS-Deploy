@@ -8,6 +8,7 @@
  */
 
 import type { EspProfileSummary } from '@/types/esp';
+import { fetchWithRetry, invalidateServicePrincipalToken } from '@/lib/intune/graph-client';
 
 const GRAPH_API_BASE = 'https://graph.microsoft.com/beta';
 
@@ -52,20 +53,24 @@ interface GraphApiListResponse<T> {
  * the authoritative source.
  */
 export async function listEspProfiles(
-  accessToken: string
+  accessToken: string,
+  tenantId?: string
 ): Promise<EspProfileSummary[]> {
   const url = new URL(
     `${GRAPH_API_BASE}/deviceManagement/deviceEnrollmentConfigurations`
   );
   url.searchParams.set('$select', 'id,displayName,description');
 
-  const response = await fetch(url.toString(), {
+  const response = await fetchWithRetry(url.toString(), {
     headers: {
       Authorization: `Bearer ${accessToken}`,
     },
-  });
+  }, 3);
 
   if (!response.ok) {
+    if (response.status === 401 && tenantId) {
+      invalidateServicePrincipalToken(tenantId);
+    }
     const errorBody = await response.json().catch(() => ({}));
     const graphMsg = (errorBody as Record<string, Record<string, string>>)?.error?.message || response.statusText;
     throw new Error(`Failed to list device enrollment configurations (${response.status}): ${graphMsg}`);
@@ -96,18 +101,23 @@ export async function listEspProfiles(
  */
 export async function getEspProfile(
   accessToken: string,
-  profileId: string
+  profileId: string,
+  tenantId?: string
 ): Promise<EspProfileConfig> {
-  const response = await fetch(
+  const response = await fetchWithRetry(
     `${GRAPH_API_BASE}/deviceManagement/deviceEnrollmentConfigurations/${profileId}`,
     {
       headers: {
         Authorization: `Bearer ${accessToken}`,
       },
-    }
+    },
+    3
   );
 
   if (!response.ok) {
+    if (response.status === 401 && tenantId) {
+      invalidateServicePrincipalToken(tenantId);
+    }
     throw new Error(`Failed to get ESP profile ${profileId}`);
   }
 
@@ -142,10 +152,11 @@ const READ_ONLY_FIELDS = [
 export async function addAppToEspProfile(
   accessToken: string,
   profileId: string,
-  appId: string
+  appId: string,
+  tenantId?: string
 ): Promise<{ alreadyAdded: boolean }> {
   // Get full profile configuration
-  const profile = await getEspProfile(accessToken, profileId);
+  const profile = await getEspProfile(accessToken, profileId, tenantId);
   const currentAppIds = profile.selectedMobileAppIds || [];
 
   if (currentAppIds.includes(appId)) {
@@ -181,6 +192,9 @@ export async function addAppToEspProfile(
   );
 
   if (!patchResponse.ok) {
+    if (patchResponse.status === 401 && tenantId) {
+      invalidateServicePrincipalToken(tenantId);
+    }
     const errorBody = await patchResponse.text().catch(() => '');
     if (patchResponse.status === 403) {
       throw new Error(
@@ -188,13 +202,11 @@ export async function addAppToEspProfile(
       );
     }
     if (patchResponse.status === 400) {
-      throw new Error(
-        `Failed to add app to ESP profile (400 Bad Request). Details: ${errorBody}`
-      );
+      console.error(`Failed to add app to ESP profile ${profileId} (400 Bad Request):`, errorBody);
+      throw new Error('Failed to add app to ESP profile: the request was rejected by Intune.');
     }
-    throw new Error(
-      `Failed to update ESP profile ${profileId} (${patchResponse.status}): ${errorBody}`
-    );
+    console.error(`Failed to update ESP profile ${profileId} (${patchResponse.status}):`, errorBody);
+    throw new Error(`Failed to update ESP profile ${profileId} (${patchResponse.status}).`);
   }
 
   return { alreadyAdded: false };

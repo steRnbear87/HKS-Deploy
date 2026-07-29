@@ -15,7 +15,7 @@
 
 import type BetterSqlite3 from 'better-sqlite3';
 import { getSnapshotDb, SnapshotUnavailableError } from './snapshot-store';
-import { getLocaleDisplay } from '@/lib/locale-utils';
+import { getLocaleDisplay, countryCodeToFlag } from '@/lib/locale-utils';
 import type { LocaleVariant } from '@/types/winget';
 import type { CuratedAppMatch } from '@/lib/app-mappings';
 import type { InstallationSnapshot } from '@/lib/winget-api';
@@ -75,6 +75,7 @@ interface CuratedAppDbRow {
   store_package_id: string | null;
   winget_last_update: string | null;
   license_bucket: string | null;
+  installer_type?: string | null;
 }
 
 function parseTags(tags: string | null): string[] | null {
@@ -100,8 +101,7 @@ function toRpcRow(r: CuratedAppDbRow): CuratedAppRpcRow {
     tags: parseTags(r.tags),
     icon_path: r.icon_path,
     popularity_rank: r.popularity_rank,
-    // installer_type is not carried in the curated_apps snapshot table.
-    installer_type: null,
+    installer_type: r.installer_type ?? null,
     app_source: r.app_source,
     store_package_id: r.store_package_id,
     winget_last_update: r.winget_last_update,
@@ -165,8 +165,15 @@ function buildFilterConditions(
   }
 
   if (f.tag) {
-    params.tagFilter = `%${f.tag}%`;
-    conditions.push(`${col('tags')} LIKE @tagFilter`);
+    // Exact element match against the JSON-array tags column (mirrors the
+    // Supabase source's `.contains('tags', [f.tag])`), not a raw LIKE
+    // substring against the serialized JSON text - the latter can both
+    // false-positive (a "windows" filter matching a "windows-11" tag) and
+    // false-match across element boundaries in the JSON encoding.
+    params.tagFilter = f.tag;
+    conditions.push(
+      `EXISTS (SELECT 1 FROM json_each(${col('tags')}) WHERE value = @tagFilter COLLATE NOCASE)`
+    );
   }
 
   if (f.licenseBuckets && f.licenseBuckets.length > 0) {
@@ -188,9 +195,12 @@ function buildFilterConditions(
   // installer_type lives on version_history, not curated_apps, and only the
   // latest version's installer matters for this facet - join on the exact
   // (winget_id, latest_version) pair rather than any historical version.
-  let joinClause = '';
+  // Always joined (LEFT, so it never drops non-matching rows on its own) so
+  // callers can also select vh.installer_type for display - previously this
+  // join only existed when the installerTypes filter was active, so the
+  // field came back hardcoded null everywhere else.
+  const joinClause = `LEFT JOIN version_history vh ON vh.winget_id = ${col('winget_id')} AND vh.version = ${col('latest_version')}`;
   if (f.installerTypes && f.installerTypes.length > 0) {
-    joinClause = `JOIN version_history vh ON vh.winget_id = ${col('winget_id')} AND vh.version = ${col('latest_version')}`;
     f.installerTypes.forEach((t, i) => {
       params[`it${i}`] = t;
     });
@@ -250,7 +260,7 @@ export class SnapshotCatalogSource implements CatalogSource {
         if (ftsMatch) {
           // FTS path: relevance bucket, then bm25, then popularity (nulls last).
           const ftsSql = `
-            SELECT ${CURATED_RPC_COLUMNS.split(', ').map((c) => `ca.${c}`).join(', ')}
+            SELECT ${CURATED_RPC_COLUMNS.split(', ').map((c) => `ca.${c}`).join(', ')}, vh.installer_type
             FROM curated_fts f
             JOIN curated_apps ca ON ca.id = f.rowid
             ${joinClause}
@@ -281,7 +291,7 @@ export class SnapshotCatalogSource implements CatalogSource {
         // ILIKE fallback when FTS returns nothing (or was skipped).
         if (rows.length === 0) {
           const fallbackSql = `
-            SELECT ${CURATED_RPC_COLUMNS.split(', ').map((c) => `ca.${c}`).join(', ')}
+            SELECT ${CURATED_RPC_COLUMNS.split(', ').map((c) => `ca.${c}`).join(', ')}, vh.installer_type
             FROM curated_apps ca
             ${joinClause}
             WHERE ca.is_verified = 1
@@ -379,15 +389,16 @@ export class SnapshotCatalogSource implements CatalogSource {
     return withDb<{ data: CuratedAppRpcRow[] | null; error: { message: string } | null }>(
       (db) => {
         const cat = category || null;
-        const categoryClause = cat ? 'AND category = @category' : '';
+        const categoryClause = cat ? 'AND ca.category = @category' : '';
         const params: Record<string, unknown> = cat ? { category: cat, limit } : { limit };
 
         const rows = db
           .prepare(
-            `SELECT ${CURATED_RPC_COLUMNS}
-             FROM curated_apps
-             WHERE is_verified = 1 AND is_locale_variant = 0 ${categoryClause}
-             ORDER BY popularity_rank IS NULL, popularity_rank ASC, name ASC
+            `SELECT ${CURATED_RPC_COLUMNS.split(', ').map((c) => `ca.${c}`).join(', ')}, vh.installer_type
+             FROM curated_apps ca
+             LEFT JOIN version_history vh ON vh.winget_id = ca.winget_id AND vh.version = ca.latest_version
+             WHERE ca.is_verified = 1 AND ca.is_locale_variant = 0 ${categoryClause}
+             ORDER BY ca.popularity_rank IS NULL, ca.popularity_rank ASC, ca.name ASC
              LIMIT @limit`
           )
           .all(params) as CuratedAppDbRow[];
@@ -405,7 +416,7 @@ export class SnapshotCatalogSource implements CatalogSource {
           .prepare(
             `SELECT category, COUNT(*) AS count
              FROM curated_apps
-             WHERE is_verified = 1 AND category IS NOT NULL
+             WHERE is_verified = 1 AND is_locale_variant = 0 AND category IS NOT NULL
              GROUP BY category`
           )
           .all() as { category: string; count: number }[];
@@ -512,6 +523,37 @@ export class SnapshotCatalogSource implements CatalogSource {
         };
       },
       () => null
+    );
+  }
+
+  async getLocaleVariants(parentWingetId: string): Promise<LocaleVariant[]> {
+    return withDb(
+      (db) => {
+        const variantRows = db
+          .prepare(
+            `SELECT winget_id, locale_code, latest_version
+             FROM curated_apps
+             WHERE parent_winget_id = ?`
+          )
+          .all(parentWingetId) as {
+          winget_id: string;
+          locale_code: string | null;
+          latest_version: string | null;
+        }[];
+
+        return variantRows.map((v) => {
+          const display = getLocaleDisplay(v.locale_code || '');
+          return {
+            wingetId: v.winget_id,
+            localeCode: v.locale_code || '',
+            localeName: display.name,
+            countryFlag: display.flag,
+            flagEmoji: countryCodeToFlag(display.flag),
+            version: v.latest_version || undefined,
+          };
+        });
+      },
+      () => []
     );
   }
 

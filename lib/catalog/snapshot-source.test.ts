@@ -161,7 +161,8 @@ describe('SnapshotCatalogSource', () => {
     // tags parsed back to an array
     const chrome = (data || []).find((r) => r.winget_id === 'Google.Chrome');
     expect(chrome?.tags).toEqual(['browser', 'web']);
-    expect(chrome?.installer_type).toBeNull();
+    // joined from version_history for the current latest_version (120.0)
+    expect(chrome?.installer_type).toBe('msi');
   });
 
   it('searchApps falls back to ILIKE for non-FTS-matching publisher terms', async () => {
@@ -191,8 +192,10 @@ describe('SnapshotCatalogSource', () => {
   it('getCategories returns per-category counts', async () => {
     const cats = await source.getCategories();
     const browsers = cats.find((c) => c.category === 'Browsers');
-    // Google.Chrome, Mozilla.Firefox, Google.Chrome.de are all verified Browsers
-    expect(browsers?.count).toBe(3);
+    // Google.Chrome, Mozilla.Firefox are verified Browsers; Google.Chrome.de
+    // is a locale variant and must be excluded, matching every other browse
+    // path (getPopularApps, getUncategorizedCount).
+    expect(browsers?.count).toBe(2);
     const comms = cats.find((c) => c.category === 'Communication');
     expect(comms?.count).toBe(1);
   });

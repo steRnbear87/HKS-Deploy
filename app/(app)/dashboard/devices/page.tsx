@@ -17,6 +17,7 @@ import {
   ArrowDown,
   ChevronsUpDown,
   Filter,
+  Download,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -41,6 +42,7 @@ import {
 import { InventoryPagination } from '@/components/inventory';
 import { usePagination } from '@/hooks/use-pagination';
 import { STALE_DAYS, summarizeDeviceHealth, isStale, isNonCompliant } from '@/lib/intune/device-health';
+import { getRegionForOfficeLocation } from '@/lib/intune/office-regions';
 import { DeviceHealthTrendChart } from '@/components/devices/DeviceHealthTrendChart';
 import { cn } from '@/lib/utils';
 import type { DeviceComplianceState, ManagedDevice } from '@/types/devices';
@@ -108,6 +110,49 @@ function formatDate(dateString: string | null): string {
   });
 }
 
+// RFC 4180: wrap in quotes and double any embedded quotes - same convention
+// as app/api/analytics/export/route.ts's escapeCSV.
+function escapeCsvValue(value: string): string {
+  if (value.includes(',') || value.includes('"') || value.includes('\n')) {
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+  return value;
+}
+
+const CSV_COLUMNS: Array<{ header: string; getValue: (d: ManagedDevice) => string }> = [
+  { header: 'Device', getValue: (d) => d.deviceName },
+  { header: 'Managed by', getValue: (d) => managementAgentLabel(d.managementAgent) },
+  { header: 'Ownership', getValue: (d) => ownerTypeLabel[d.managedDeviceOwnerType] },
+  { header: 'Compliance', getValue: (d) => complianceLabel[d.complianceState] },
+  { header: 'OS', getValue: (d) => d.operatingSystem },
+  { header: 'OS version', getValue: (d) => d.osVersion || '' },
+  { header: 'Primary user', getValue: (d) => d.userPrincipalName || '' },
+  { header: 'Office location', getValue: (d) => d.officeLocation || '' },
+  { header: 'Region', getValue: (d) => getRegionForOfficeLocation(d.officeLocation) },
+  { header: 'Last check-in', getValue: (d) => formatDate(d.lastSyncDateTime) },
+  { header: 'Enrollment date', getValue: (d) => formatDate(d.enrolledDateTime) },
+  { header: 'Model', getValue: (d) => d.model || '' },
+  { header: 'BIOS', getValue: (d) => d.biosVersion ?? '' },
+];
+
+function devicesToCsv(devices: ManagedDevice[]): string {
+  const headerRow = CSV_COLUMNS.map((c) => escapeCsvValue(c.header)).join(',');
+  const dataRows = devices.map((d) => CSV_COLUMNS.map((c) => escapeCsvValue(c.getValue(d))).join(','));
+  return [headerRow, ...dataRows].join('\n');
+}
+
+function downloadCsv(csv: string, filename: string): void {
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
 type SortColumn =
   | 'deviceName'
   | 'managementAgent'
@@ -119,8 +164,9 @@ type SortColumn =
   | 'lastSyncDateTime'
   | 'enrolledDateTime'
   | 'model'
-  | 'serialNumber'
-  | 'biosVersion';
+  | 'biosVersion'
+  | 'officeLocation'
+  | 'region';
 
 type SortDirection = 'asc' | 'desc';
 
@@ -137,20 +183,31 @@ function getSortValue(device: ManagedDevice, column: SortColumn): string | numbe
       return ownerTypeLabel[device.managedDeviceOwnerType];
     case 'complianceState':
       return complianceLabel[device.complianceState];
+    case 'region':
+      return getRegionForOfficeLocation(device.officeLocation);
     default:
       return device[column] ?? '';
   }
 }
 
-type FilterColumn = 'operatingSystem' | 'osVersion' | 'managementAgent' | 'managedDeviceOwnerType';
+// Every sortable column is also filterable - the underlying filter value is
+// always the raw field (so Set membership/equality checks stay simple and
+// exact), with getFilterLabel handling the same value->label mappings
+// getSortValue already applies for display. 'region' has no underlying
+// ManagedDevice field - it's derived from officeLocation - so it's handled
+// explicitly before the generic device[column] fallback.
+type FilterColumn = SortColumn;
 
 function getFilterValue(device: ManagedDevice, column: FilterColumn): string {
+  if (column === 'region') return getRegionForOfficeLocation(device.officeLocation);
   return device[column] ?? '';
 }
 
 function getFilterLabel(column: FilterColumn, value: string): string {
   if (column === 'managementAgent') return managementAgentLabel(value);
   if (column === 'managedDeviceOwnerType') return ownerTypeLabel[value as ManagedDevice['managedDeviceOwnerType']] ?? value;
+  if (column === 'complianceState') return complianceLabel[value as DeviceComplianceState] ?? value;
+  if (column === 'lastSyncDateTime' || column === 'enrolledDateTime') return value ? formatDate(value) : '—';
   return value || '—';
 }
 
@@ -257,12 +314,35 @@ export default function DevicesPage() {
   // Distinct values for filter dropdowns, derived from the full unfiltered
   // list so options don't shrink as other filters are applied.
   const filterOptions = useMemo(() => {
-    const columns: FilterColumn[] = ['operatingSystem', 'osVersion', 'managementAgent', 'managedDeviceOwnerType'];
+    const columns: FilterColumn[] = [
+      'deviceName',
+      'managementAgent',
+      'managedDeviceOwnerType',
+      'complianceState',
+      'operatingSystem',
+      'osVersion',
+      'userPrincipalName',
+      'lastSyncDateTime',
+      'enrolledDateTime',
+      'model',
+      'biosVersion',
+      'officeLocation',
+      'region',
+    ];
     const result: Record<FilterColumn, string[]> = {
-      operatingSystem: [],
-      osVersion: [],
+      deviceName: [],
       managementAgent: [],
       managedDeviceOwnerType: [],
+      complianceState: [],
+      operatingSystem: [],
+      osVersion: [],
+      userPrincipalName: [],
+      lastSyncDateTime: [],
+      enrolledDateTime: [],
+      model: [],
+      biosVersion: [],
+      officeLocation: [],
+      region: [],
     };
     for (const column of columns) {
       result[column] = [...new Set(devices.map((d) => getFilterValue(d, column)))].sort();
@@ -315,7 +395,8 @@ export default function DevicesPage() {
           d.deviceName.toLowerCase().includes(searchLower) ||
           d.userPrincipalName?.toLowerCase().includes(searchLower) ||
           d.model?.toLowerCase().includes(searchLower) ||
-          d.serialNumber?.toLowerCase().includes(searchLower)
+          d.serialNumber?.toLowerCase().includes(searchLower) ||
+          d.officeLocation?.toLowerCase().includes(searchLower)
       );
     }
 
@@ -347,6 +428,12 @@ export default function DevicesPage() {
   useEffect(() => {
     setPage(1);
   }, [search, healthFilter, columnFilters, sortColumn, sortDirection, setPage]);
+
+  const handleExportCsv = () => {
+    const csv = devicesToCsv(filteredDevices);
+    const timestamp = new Date().toISOString().slice(0, 10);
+    downloadCsv(csv, `devices-export-${timestamp}.csv`);
+  };
 
   const containerVariants = {
     hidden: { opacity: 0 },
@@ -398,15 +485,26 @@ export default function DevicesPage() {
         gradient
         gradientColors="mixed"
         actions={
-          <Button
-            variant="ghost"
-            onClick={() => refetch()}
-            disabled={isFetching}
-            className="text-text-secondary hover:text-text-primary"
-          >
-            <RefreshCw className={`w-4 h-4 mr-2 ${isFetching ? 'animate-spin' : ''}`} />
-            <T>Refresh</T>
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              onClick={handleExportCsv}
+              disabled={filteredDevices.length === 0}
+              className="text-text-secondary hover:text-text-primary"
+            >
+              <Download className="w-4 h-4 mr-2" />
+              <T>Export CSV</T>
+            </Button>
+            <Button
+              variant="ghost"
+              onClick={() => refetch()}
+              disabled={isFetching}
+              className="text-text-secondary hover:text-text-primary"
+            >
+              <RefreshCw className={`w-4 h-4 mr-2 ${isFetching ? 'animate-spin' : ''}`} />
+              <T>Refresh</T>
+            </Button>
+          </div>
         }
       />
 
@@ -476,7 +574,7 @@ export default function DevicesPage() {
           <Input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search by device name, user, model, or serial number..."
+            placeholder="Search by device name, user, model, serial number, or office location..."
             className="pl-9 bg-bg-elevated border-overlay/10 focus:border-accent-cyan/50"
           />
         </div>
@@ -507,7 +605,17 @@ export default function DevicesPage() {
               <thead>
                 <tr className="border-b border-overlay/15">
                   <th className="text-left py-3 px-4 text-sm font-medium text-text-muted">
-                    <SortableHeader label="Device" column="deviceName" sortColumn={sortColumn} sortDirection={sortDirection} onSort={handleSort} />
+                    <div className="flex items-center gap-1.5">
+                      <SortableHeader label="Device" column="deviceName" sortColumn={sortColumn} sortDirection={sortDirection} onSort={handleSort} />
+                      <ColumnFilter
+                        label="Device"
+                        options={filterOptions.deviceName}
+                        column="deviceName"
+                        selected={columnFilters.deviceName ?? new Set()}
+                        onChange={handleFilterChange}
+                        onClear={handleClearFilter}
+                      />
+                    </div>
                   </th>
                   <th className="text-left py-3 px-4 text-sm font-medium text-text-muted whitespace-nowrap">
                     <div className="flex items-center gap-1.5">
@@ -536,7 +644,17 @@ export default function DevicesPage() {
                     </div>
                   </th>
                   <th className="text-left py-3 px-4 text-sm font-medium text-text-muted">
-                    <SortableHeader label="Compliance" column="complianceState" sortColumn={sortColumn} sortDirection={sortDirection} onSort={handleSort} />
+                    <div className="flex items-center gap-1.5">
+                      <SortableHeader label="Compliance" column="complianceState" sortColumn={sortColumn} sortDirection={sortDirection} onSort={handleSort} />
+                      <ColumnFilter
+                        label="Compliance"
+                        options={filterOptions.complianceState}
+                        column="complianceState"
+                        selected={columnFilters.complianceState ?? new Set()}
+                        onChange={handleFilterChange}
+                        onClear={handleClearFilter}
+                      />
+                    </div>
                   </th>
                   <th className="text-left py-3 px-4 text-sm font-medium text-text-muted whitespace-nowrap">
                     <div className="flex items-center gap-1.5">
@@ -565,22 +683,95 @@ export default function DevicesPage() {
                     </div>
                   </th>
                   <th className="text-left py-3 px-4 text-sm font-medium text-text-muted">
-                    <SortableHeader label="Primary user" column="userPrincipalName" sortColumn={sortColumn} sortDirection={sortDirection} onSort={handleSort} />
+                    <div className="flex items-center gap-1.5">
+                      <SortableHeader label="Primary user" column="userPrincipalName" sortColumn={sortColumn} sortDirection={sortDirection} onSort={handleSort} />
+                      <ColumnFilter
+                        label="Primary user"
+                        options={filterOptions.userPrincipalName}
+                        column="userPrincipalName"
+                        selected={columnFilters.userPrincipalName ?? new Set()}
+                        onChange={handleFilterChange}
+                        onClear={handleClearFilter}
+                      />
+                    </div>
                   </th>
                   <th className="text-left py-3 px-4 text-sm font-medium text-text-muted whitespace-nowrap">
-                    <SortableHeader label="Last check-in" column="lastSyncDateTime" sortColumn={sortColumn} sortDirection={sortDirection} onSort={handleSort} />
+                    <div className="flex items-center gap-1.5">
+                      <SortableHeader label="Office location" column="officeLocation" sortColumn={sortColumn} sortDirection={sortDirection} onSort={handleSort} />
+                      <ColumnFilter
+                        label="Office location"
+                        options={filterOptions.officeLocation}
+                        column="officeLocation"
+                        selected={columnFilters.officeLocation ?? new Set()}
+                        onChange={handleFilterChange}
+                        onClear={handleClearFilter}
+                      />
+                    </div>
                   </th>
                   <th className="text-left py-3 px-4 text-sm font-medium text-text-muted whitespace-nowrap">
-                    <SortableHeader label="Enrollment date" column="enrolledDateTime" sortColumn={sortColumn} sortDirection={sortDirection} onSort={handleSort} />
-                  </th>
-                  <th className="text-left py-3 px-4 text-sm font-medium text-text-muted">
-                    <SortableHeader label="Model" column="model" sortColumn={sortColumn} sortDirection={sortDirection} onSort={handleSort} />
+                    <div className="flex items-center gap-1.5">
+                      <SortableHeader label="Region" column="region" sortColumn={sortColumn} sortDirection={sortDirection} onSort={handleSort} />
+                      <ColumnFilter
+                        label="Region"
+                        options={filterOptions.region}
+                        column="region"
+                        selected={columnFilters.region ?? new Set()}
+                        onChange={handleFilterChange}
+                        onClear={handleClearFilter}
+                      />
+                    </div>
                   </th>
                   <th className="text-left py-3 px-4 text-sm font-medium text-text-muted whitespace-nowrap">
-                    <SortableHeader label="Serial number" column="serialNumber" sortColumn={sortColumn} sortDirection={sortDirection} onSort={handleSort} />
+                    <div className="flex items-center gap-1.5">
+                      <SortableHeader label="Last check-in" column="lastSyncDateTime" sortColumn={sortColumn} sortDirection={sortDirection} onSort={handleSort} />
+                      <ColumnFilter
+                        label="Last check-in"
+                        options={filterOptions.lastSyncDateTime}
+                        column="lastSyncDateTime"
+                        selected={columnFilters.lastSyncDateTime ?? new Set()}
+                        onChange={handleFilterChange}
+                        onClear={handleClearFilter}
+                      />
+                    </div>
                   </th>
                   <th className="text-left py-3 px-4 text-sm font-medium text-text-muted whitespace-nowrap">
-                    <SortableHeader label="BIOS" column="biosVersion" sortColumn={sortColumn} sortDirection={sortDirection} onSort={handleSort} />
+                    <div className="flex items-center gap-1.5">
+                      <SortableHeader label="Enrollment date" column="enrolledDateTime" sortColumn={sortColumn} sortDirection={sortDirection} onSort={handleSort} />
+                      <ColumnFilter
+                        label="Enrollment date"
+                        options={filterOptions.enrolledDateTime}
+                        column="enrolledDateTime"
+                        selected={columnFilters.enrolledDateTime ?? new Set()}
+                        onChange={handleFilterChange}
+                        onClear={handleClearFilter}
+                      />
+                    </div>
+                  </th>
+                  <th className="text-left py-3 px-4 text-sm font-medium text-text-muted whitespace-nowrap">
+                    <div className="flex items-center gap-1.5">
+                      <SortableHeader label="Model" column="model" sortColumn={sortColumn} sortDirection={sortDirection} onSort={handleSort} />
+                      <ColumnFilter
+                        label="Model"
+                        options={filterOptions.model}
+                        column="model"
+                        selected={columnFilters.model ?? new Set()}
+                        onChange={handleFilterChange}
+                        onClear={handleClearFilter}
+                      />
+                    </div>
+                  </th>
+                  <th className="text-left py-3 px-4 text-sm font-medium text-text-muted whitespace-nowrap">
+                    <div className="flex items-center gap-1.5">
+                      <SortableHeader label="BIOS" column="biosVersion" sortColumn={sortColumn} sortDirection={sortDirection} onSort={handleSort} />
+                      <ColumnFilter
+                        label="BIOS"
+                        options={filterOptions.biosVersion}
+                        column="biosVersion"
+                        selected={columnFilters.biosVersion ?? new Set()}
+                        onChange={handleFilterChange}
+                        onClear={handleClearFilter}
+                      />
+                    </div>
                   </th>
                 </tr>
               </thead>
@@ -609,6 +800,10 @@ export default function DevicesPage() {
                     <td className="py-3 px-4 text-sm text-text-secondary whitespace-nowrap">{device.operatingSystem}</td>
                     <td className="py-3 px-4 text-sm text-text-secondary whitespace-nowrap">{device.osVersion || '—'}</td>
                     <td className="py-3 px-4 text-sm text-text-secondary">{device.userPrincipalName || '—'}</td>
+                    <td className="py-3 px-4 text-sm text-text-secondary whitespace-nowrap">{device.officeLocation || '—'}</td>
+                    <td className="py-3 px-4 text-sm text-text-secondary whitespace-nowrap">
+                      {getRegionForOfficeLocation(device.officeLocation)}
+                    </td>
                     <td className="py-3 px-4 text-sm text-text-muted whitespace-nowrap">
                       {formatDate(device.lastSyncDateTime)}
                     </td>
@@ -616,9 +811,6 @@ export default function DevicesPage() {
                       {formatDate(device.enrolledDateTime)}
                     </td>
                     <td className="py-3 px-4 text-sm text-text-secondary whitespace-nowrap">{device.model || '—'}</td>
-                    <td className="py-3 px-4 text-sm text-text-secondary font-mono whitespace-nowrap">
-                      {device.serialNumber || '—'}
-                    </td>
                     <td
                       className="py-3 px-4 text-sm text-text-secondary whitespace-nowrap"
                       title={device.biosCapturedAt ? `As of ${formatDate(device.biosCapturedAt)}` : undefined}

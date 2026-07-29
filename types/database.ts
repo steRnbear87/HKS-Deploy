@@ -280,6 +280,14 @@ export interface Database {
           archived_at: string | null;
           is_auto_update: boolean;
           auto_update_policy_id: string | null;
+          packager_id: string | null;
+          packager_heartbeat_at: string | null;
+          claimed_at: string | null;
+          error_stage: string | null;
+          error_category: string | null;
+          error_code: string | null;
+          error_details: Json | null;
+          warnings: Json | null;
         };
         Insert: {
           id?: string;
@@ -324,6 +332,14 @@ export interface Database {
           archived_at?: string | null;
           is_auto_update?: boolean;
           auto_update_policy_id?: string | null;
+          packager_id?: string | null;
+          packager_heartbeat_at?: string | null;
+          claimed_at?: string | null;
+          error_stage?: string | null;
+          error_category?: string | null;
+          error_code?: string | null;
+          error_details?: Json | null;
+          warnings?: Json | null;
         };
         Update: {
           id?: string;
@@ -368,6 +384,14 @@ export interface Database {
           archived_at?: string | null;
           is_auto_update?: boolean;
           auto_update_policy_id?: string | null;
+          packager_id?: string | null;
+          packager_heartbeat_at?: string | null;
+          claimed_at?: string | null;
+          error_stage?: string | null;
+          error_category?: string | null;
+          error_code?: string | null;
+          error_details?: Json | null;
+          warnings?: Json | null;
         };
         Relationships: GenericRelationship[];
       };
@@ -815,6 +839,10 @@ export interface Database {
           tenant_id: string;
           device_id: string;
           bios_version: string | null;
+          battery_health_percentage: number | null;
+          battery_charge_cycles: number | null;
+          total_storage_bytes: number | null;
+          free_storage_bytes: number | null;
           captured_at: string;
         };
         Insert: {
@@ -822,6 +850,10 @@ export interface Database {
           tenant_id: string;
           device_id: string;
           bios_version?: string | null;
+          battery_health_percentage?: number | null;
+          battery_charge_cycles?: number | null;
+          total_storage_bytes?: number | null;
+          free_storage_bytes?: number | null;
           captured_at?: string;
         };
         Update: {
@@ -829,6 +861,76 @@ export interface Database {
           tenant_id?: string;
           device_id?: string;
           bios_version?: string | null;
+          battery_health_percentage?: number | null;
+          battery_charge_cycles?: number | null;
+          total_storage_bytes?: number | null;
+          free_storage_bytes?: number | null;
+          captured_at?: string;
+        };
+        Relationships: GenericRelationship[];
+      };
+      autopilot_device_snapshots: {
+        Row: {
+          id: string;
+          tenant_id: string;
+          device_id: string;
+          serial_number: string | null;
+          group_tag: string | null;
+          manufacturer: string | null;
+          model: string | null;
+          enrollment_state: string;
+          deployment_profile_assignment_status: string;
+          last_contacted_at: string | null;
+          captured_at: string;
+        };
+        Insert: {
+          id?: string;
+          tenant_id: string;
+          device_id: string;
+          serial_number?: string | null;
+          group_tag?: string | null;
+          manufacturer?: string | null;
+          model?: string | null;
+          enrollment_state: string;
+          deployment_profile_assignment_status: string;
+          last_contacted_at?: string | null;
+          captured_at?: string;
+        };
+        Update: {
+          id?: string;
+          tenant_id?: string;
+          device_id?: string;
+          serial_number?: string | null;
+          group_tag?: string | null;
+          manufacturer?: string | null;
+          model?: string | null;
+          enrollment_state?: string;
+          deployment_profile_assignment_status?: string;
+          last_contacted_at?: string | null;
+          captured_at?: string;
+        };
+        Relationships: GenericRelationship[];
+      };
+      user_office_locations: {
+        Row: {
+          id: string;
+          tenant_id: string;
+          user_principal_name: string;
+          office_location: string | null;
+          captured_at: string;
+        };
+        Insert: {
+          id?: string;
+          tenant_id: string;
+          user_principal_name: string;
+          office_location?: string | null;
+          captured_at?: string;
+        };
+        Update: {
+          id?: string;
+          tenant_id?: string;
+          user_principal_name?: string;
+          office_location?: string | null;
           captured_at?: string;
         };
         Relationships: GenericRelationship[];
@@ -2081,6 +2183,14 @@ export interface Database {
           remaining: number;
           reset_at: number;
         };
+      };
+      replace_fleet_app_inventory: {
+        Args: {
+          p_tenant_id: string;
+          p_snapshot_date: string;
+          p_rows: Json;
+        };
+        Returns: void;
       };
     };
     Enums: {

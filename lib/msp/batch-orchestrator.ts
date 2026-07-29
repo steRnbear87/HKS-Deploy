@@ -130,7 +130,7 @@ export async function advanceInProgressBatches(): Promise<RecoverySummary> {
         // Find stale items (in_progress for too long)
         const { data: staleItems, error: staleError } = await supabase
           .from('msp_batch_deployment_items')
-          .select('id')
+          .select('id, packaging_job_id')
           .eq('batch_id', batch.id)
           .eq('status', 'in_progress')
           .lt('started_at', staleThreshold);
@@ -140,19 +140,37 @@ export async function advanceInProgressBatches(): Promise<RecoverySummary> {
           continue;
         }
 
-        // Mark stale items as failed
+        // Reconcile stale items against their linked job's real status before
+        // declaring a timeout. onJobCompleted (fired from the package
+        // callback route) can itself fail after the underlying job already
+        // succeeded or failed - previously that left the item stuck at
+        // in_progress until this sweep blindly marked it "failed" even
+        // though the job actually deployed. Check reality first.
         if (staleItems && staleItems.length > 0) {
-          const staleIds = staleItems.map((item) => item.id);
-          await supabase
-            .from('msp_batch_deployment_items')
-            .update({
-              status: 'failed',
-              error_message: 'Timed out waiting for packaging',
-              completed_at: new Date().toISOString(),
-            })
-            .in('id', staleIds);
+          const db = getDatabase();
+          for (const item of staleItems as Array<{ id: string; packaging_job_id: string | null }>) {
+            const job = item.packaging_job_id ? await db.jobs.getById(item.packaging_job_id) : null;
 
-          summary.staleItemsRecovered += staleIds.length;
+            let newStatus: 'completed' | 'failed' = 'failed';
+            let errorMessage = 'Timed out waiting for packaging';
+            if (job?.status === 'deployed') {
+              newStatus = 'completed';
+              errorMessage = '';
+            } else if (job?.status === 'failed') {
+              errorMessage = job.error_message || 'Packaging failed';
+            }
+
+            await supabase
+              .from('msp_batch_deployment_items')
+              .update({
+                status: newStatus,
+                error_message: newStatus === 'failed' ? errorMessage : null,
+                completed_at: new Date().toISOString(),
+              })
+              .eq('id', item.id);
+          }
+
+          summary.staleItemsRecovered += staleItems.length;
         }
 
         // Try to start more items and check completion
@@ -264,6 +282,28 @@ async function startBatchItems(batchId: string): Promise<number> {
   let started = 0;
 
   for (const item of pendingItems) {
+    // Atomically claim this item before doing any work on it. Without this,
+    // an overlapping cron invocation (the route allows up to 5 minutes but
+    // the cron fires every 2) that read the same pending rows would package
+    // and deploy the same item a second time - the only status write that
+    // used to happen was "in_progress" at the very end of the loop body,
+    // with no guard, so two concurrent runs could both get this far.
+    const { data: claimedRows, error: claimError } = await supabase
+      .from('msp_batch_deployment_items')
+      .update({ status: 'in_progress', started_at: new Date().toISOString() })
+      .eq('id', item.id)
+      .eq('status', 'pending')
+      .select('id');
+
+    if (claimError) {
+      console.error(`[BatchOrchestrator] Failed to claim item ${item.id}:`, claimError.message);
+      continue;
+    }
+    if (!claimedRows || claimedRows.length === 0) {
+      // Another concurrent run already claimed this item - not our job to process.
+      continue;
+    }
+
     try {
       // If no installer details, fail the item
       if (!installerDetails) {
@@ -357,14 +397,11 @@ async function startBatchItems(batchId: string): Promise<number> {
       }
       await db.jobs.update(jobId, jobUpdate);
 
-      // Link job to batch item and mark in_progress
+      // Item is already in_progress from the atomic claim above - just link
+      // the job it was started for.
       await supabase
         .from('msp_batch_deployment_items')
-        .update({
-          packaging_job_id: jobId,
-          status: 'in_progress',
-          started_at: new Date().toISOString(),
-        })
+        .update({ packaging_job_id: jobId })
         .eq('id', item.id);
 
       started++;
@@ -487,7 +524,7 @@ async function advanceBatch(batchId: string): Promise<boolean> {
 
   // Fire webhook and audit log
   if (batch) {
-    const eventType = finalStatus === 'completed' ? 'batch.completed' : 'batch.completed';
+    const eventType = finalStatus === 'completed' ? 'batch.completed' : 'batch.failed';
     try {
       await queueWebhookDelivery(batch.organization_id, eventType, {
         batch_id: batchId,

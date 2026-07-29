@@ -14,7 +14,7 @@ import { resolveTargetTenantId } from '@/lib/msp/tenant-resolution';
 import { checkStoredConsent } from '@/lib/msp/consent-cache';
 import { verifyTenantConsent } from '@/lib/msp/consent-verification';
 import { parseAccessToken } from '@/lib/auth-utils';
-import { getServicePrincipalToken } from '@/lib/intune/graph-client';
+import { getServicePrincipalToken, invalidateServicePrincipalToken, fetchWithRetry } from '@/lib/intune/graph-client';
 
 // deviceLogCollectionResponse/createDeviceLogCollectionRequest returned
 // "Resource not found for the segment" on v1.0 against a live tenant despite
@@ -126,12 +126,16 @@ export async function GET(
       return NextResponse.json({ error: 'Failed to get Graph API token' }, { status: 500 });
     }
 
-    const response = await fetch(
+    const response = await fetchWithRetry(
       `${GRAPH_API_BASE}/deviceManagement/managedDevices/${encodeURIComponent(id)}/logCollectionRequests`,
-      { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } }
+      { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } },
+      3
     );
 
     if (!response.ok) {
+      if (response.status === 401) {
+        invalidateServicePrincipalToken(tenantId);
+      }
       const bodyText = await response.text().catch(() => '');
       console.error('Error listing device log collection requests:', response.status, bodyText);
       if (response.status === 403 && bodyText.includes('DeviceManagementManagedDevices')) {
@@ -193,6 +197,9 @@ export async function POST(
     );
 
     if (!response.ok) {
+      if (response.status === 401) {
+        invalidateServicePrincipalToken(tenantId);
+      }
       const bodyText = await response.text().catch(() => '');
       console.error('Error creating device log collection request:', response.status, bodyText);
       if (response.status === 403 && bodyText.includes('DeviceManagementManagedDevices')) {

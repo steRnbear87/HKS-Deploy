@@ -7,39 +7,36 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { logPermissions } from '@/lib/permission-logger';
+import { parseAccessToken } from '@/lib/auth-utils';
 
 interface SignInTrackingPayload {
-  userId: string;
-  email: string;
-  name: string | null;
-  tenantId: string;
   authMethod: 'popup' | 'redirect' | 'silent';
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
   try {
-    const payload: SignInTrackingPayload = await request.json();
-
-    const { userId, email, name, tenantId, authMethod } = payload;
-
-    // Validate required fields
-    if (!userId || !email || !tenantId) {
-      return NextResponse.json(
-        { error: 'Missing required fields' },
-        { status: 400 }
-      );
+    // This writes an authoritative entry to the permission-audit log, so the
+    // identity fields must come from a verified access token - not the
+    // request body, which any anonymous caller could otherwise fill in with
+    // an arbitrary userId/tenantId/email to poison the audit trail.
+    const user = await parseAccessToken(request.headers.get('Authorization'));
+    if (!user) {
+      return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
     }
+
+    const payload: SignInTrackingPayload = await request.json();
+    const { authMethod } = payload;
 
     // Log the sign-in event
     logPermissions({
       route: '/api/auth/track-signin',
       action: 'user_signed_in',
-      tenantId,
+      tenantId: user.tenantId,
       granted: true,
       details: {
-        userId,
-        email,
-        name,
+        userId: user.userId,
+        email: user.userEmail,
+        name: user.userName,
         authMethod,
         timestamp: new Date().toISOString(),
       },

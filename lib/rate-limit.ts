@@ -165,12 +165,23 @@ function checkRateLimitMemory(key: string, config: RateLimitConfig): RateLimitRe
 }
 
 /**
- * Check rate limit with Supabase backend, falling back to in-memory
+ * Check rate limit with Supabase backend, falling back to in-memory.
+ *
+ * The in-memory fallback is a real limiter for a single-process/self-hosted
+ * deployment, but on a multi-instance hosted deployment it's per-process and
+ * doesn't share state across instances - a transient Supabase/RPC error
+ * there silently turns a "5 requests/minute" endpoint into "5 requests/
+ * minute per instance", with no signal that it happened. Log it so an
+ * operator can at least notice a spike in fallback usage.
  */
 export async function checkRateLimit(key: string, config: RateLimitConfig): Promise<RateLimitResult> {
   try {
     return await checkRateLimitDB(key, config);
-  } catch {
+  } catch (error) {
+    console.error(
+      `[rate-limit] Supabase check_rate_limit failed for key "${key}"; falling back to in-memory (not shared across instances):`,
+      error instanceof Error ? error.message : error
+    );
     return checkRateLimitMemory(key, config);
   }
 }
@@ -266,7 +277,11 @@ export function resetRateLimit(key: string): void {
 export async function getRateLimitStatus(key: string, config: RateLimitConfig): Promise<RateLimitResult> {
   try {
     return await checkRateLimitDB(key, config);
-  } catch {
+  } catch (error) {
+    console.error(
+      `[rate-limit] Supabase check_rate_limit failed for key "${key}" (status check); falling back to in-memory:`,
+      error instanceof Error ? error.message : error
+    );
     const entry = rateLimitStore.get(key);
     const now = Date.now();
 

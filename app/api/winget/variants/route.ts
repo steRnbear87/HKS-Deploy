@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
-import { getLocaleDisplay, countryCodeToFlag } from '@/lib/locale-utils';
+import { getCatalogSource } from '@/lib/catalog';
 
 export async function GET(request: NextRequest) {
   try {
@@ -14,44 +13,7 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const supabaseKey =
-      process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-    if (!supabaseUrl || !supabaseKey) {
-      return NextResponse.json(
-        { error: 'Database configuration missing' },
-        { status: 500 }
-      );
-    }
-
-    const supabase = createClient(supabaseUrl, supabaseKey);
-
-    const { data, error } = await supabase.rpc('get_locale_variants', {
-      parent_id: parentId,
-    });
-
-    if (error) {
-      console.error('Error fetching locale variants:', error);
-      return NextResponse.json(
-        { error: 'Failed to fetch locale variants' },
-        { status: 500 }
-      );
-    }
-
-    const variants = (data || []).map(
-      (row: { winget_id: string; locale_code: string; latest_version: string | null }) => {
-        const display = getLocaleDisplay(row.locale_code);
-        return {
-          wingetId: row.winget_id,
-          localeCode: row.locale_code,
-          localeName: display.name,
-          countryFlag: display.flag,
-          flagEmoji: countryCodeToFlag(display.flag),
-          version: row.latest_version,
-        };
-      }
-    );
+    const variants = await getCatalogSource().getLocaleVariants(parentId);
 
     return NextResponse.json({
       parentId,

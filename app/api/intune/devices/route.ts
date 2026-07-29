@@ -191,6 +191,25 @@ export async function GET(request: NextRequest) {
       console.error(`Failed to join BIOS cache for tenant ${tenantId}:`, error);
     }
 
+    // Join in cached primary-user office locations (user_office_locations),
+    // keyed by userPrincipalName (lowercased - see lib/intune/user-office-location.ts)
+    // - one bulk query, same rationale as the BIOS join above. Best-effort:
+    // a DB hiccup here shouldn't fail the whole device list.
+    try {
+      const officeLocationRows = await getDatabase().userOfficeLocations.getByTenantId(tenantId);
+      const officeLocationByUpn = new Map(
+        officeLocationRows.map((row) => [row.user_principal_name.toLowerCase(), row])
+      );
+      for (const device of devices) {
+        const officeLocationRow = device.userPrincipalName
+          ? officeLocationByUpn.get(device.userPrincipalName.toLowerCase())
+          : undefined;
+        device.officeLocation = officeLocationRow?.office_location ?? null;
+      }
+    } catch (error) {
+      console.error(`Failed to join office-location cache for tenant ${tenantId}:`, error);
+    }
+
     return NextResponse.json({
       devices,
       total: devices.length,

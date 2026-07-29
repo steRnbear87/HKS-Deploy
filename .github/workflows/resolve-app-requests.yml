@@ -15,6 +15,13 @@ on:
 permissions:
   issues: write
 
+# The scheduled run and a manual workflow_dispatch can otherwise overlap,
+# both listing the same open issues and racing to resolve/comment on them
+# twice.
+concurrency:
+  group: resolve-app-requests
+  cancel-in-progress: false
+
 jobs:
   resolve:
     runs-on: ubuntu-24.04

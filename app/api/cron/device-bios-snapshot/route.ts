@@ -14,14 +14,14 @@
 
 import { NextResponse } from 'next/server';
 import { captureDueBiosSnapshots } from '@/lib/device-health/bios-snapshot';
+import { verifyCronSecret } from '@/lib/cron-auth';
 
 const BUDGET_MS = 2 * 60 * 1000;
 
 export const maxDuration = 300;
 
 export async function GET(request: Request) {
-  const authHeader = request.headers.get('authorization');
-  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+  if (!verifyCronSecret(request)) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 

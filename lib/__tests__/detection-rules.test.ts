@@ -333,6 +333,60 @@ describe('generateDetectionRules', () => {
       expect(rules).toHaveLength(1);
       expect(rules[0].type).toBe('script');
     });
+
+    it('should prefer the registry marker over script detection when wingetId and version are provided', () => {
+      const installer: NormalizedInstaller = {
+        architecture: 'x64',
+        url: 'https://example.com/app.msix',
+        sha256: 'abc123',
+        type: 'msix',
+        packageFamilyName: 'Microsoft.VSCode_8wekyb3d8bbwe',
+      };
+
+      const rules = generateDetectionRules(installer, 'VS Code', 'Microsoft.VSCode', '1.2.3');
+
+      expect(rules).toHaveLength(1);
+      expect(rules[0].type).toBe('registry');
+      const regRule = rules[0] as RegistryDetectionRule;
+      expect(regRule.keyPath).toContain('Microsoft_VSCode');
+      expect(regRule.detectionValue).toBe('1.2.3');
+      expect(regRule.operator).toBe('greaterThanOrEqual');
+    });
+
+    it('should fall back to a version-aware script when version is available but wingetId is not', () => {
+      const installer: NormalizedInstaller = {
+        architecture: 'x64',
+        url: 'https://example.com/app.msix',
+        sha256: 'abc123',
+        type: 'msix',
+        packageFamilyName: 'Microsoft.VSCode_8wekyb3d8bbwe',
+      };
+
+      const rules = generateDetectionRules(installer, 'VS Code', undefined, "1.2.3'; Remove-Item C:\\ -Recurse -Force #");
+
+      expect(rules).toHaveLength(1);
+      expect(rules[0].type).toBe('script');
+      const scriptRule = rules[0] as ScriptDetectionRule;
+      expect(scriptRule.scriptContent).toContain('[version]$pkg.Version -ge [version]$requiredVersion');
+      expect(scriptRule.scriptContent).toContain("$requiredVersion = '1.2.3''; Remove-Item C:\\ -Recurse -Force #'");
+    });
+
+    it('should fall back to presence-only detection when no wingetId or version is provided', () => {
+      const installer: NormalizedInstaller = {
+        architecture: 'x64',
+        url: 'https://example.com/app.msix',
+        sha256: 'abc123',
+        type: 'msix',
+        packageFamilyName: 'Microsoft.VSCode_8wekyb3d8bbwe',
+      };
+
+      const rules = generateDetectionRules(installer, 'VS Code');
+
+      expect(rules[0].type).toBe('script');
+      const scriptRule = rules[0] as ScriptDetectionRule;
+      expect(scriptRule.scriptContent).not.toContain('requiredVersion');
+      expect(scriptRule.scriptContent).toContain('if ($package) {');
+    });
   });
 
   describe('Folder detection rules', () => {

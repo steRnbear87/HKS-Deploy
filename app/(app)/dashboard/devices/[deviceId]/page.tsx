@@ -11,6 +11,7 @@ import { DeviceLogsSection } from '@/components/devices/DeviceLogsSection';
 import { DeviceWindowsUpdatesSection } from '@/components/devices/DeviceWindowsUpdatesSection';
 import { DeviceAppInventorySection } from '@/components/devices/DeviceAppInventorySection';
 import { DeviceComplianceStatusSection } from '@/components/devices/DeviceComplianceStatusSection';
+import { DeviceActionsMenu } from '@/components/devices/DeviceActionsMenu';
 import type { DeviceComplianceState } from '@/types/devices';
 
 const complianceTone: Record<DeviceComplianceState, StatusTone> = {
@@ -129,15 +130,18 @@ export default function DeviceDetailPage({ params }: { params: Promise<{ deviceI
                 : 'default',
         }}
         actions={
-          <Button
-            variant="ghost"
-            onClick={() => refetch()}
-            disabled={isFetching}
-            className="text-text-secondary hover:text-text-primary"
-          >
-            <RefreshCw className={`w-4 h-4 mr-2 ${isFetching ? 'animate-spin' : ''}`} />
-            <T>Refresh</T>
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="ghost"
+              onClick={() => refetch()}
+              disabled={isFetching}
+              className="text-text-secondary hover:text-text-primary"
+            >
+              <RefreshCw className={`w-4 h-4 mr-2 ${isFetching ? 'animate-spin' : ''}`} />
+              <T>Refresh</T>
+            </Button>
+            <DeviceActionsMenu deviceId={deviceId} deviceName={device.deviceName} />
+          </div>
         }
       />
 

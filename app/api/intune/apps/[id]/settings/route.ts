@@ -94,7 +94,7 @@ export async function PATCH(
     }
 
     // Verify the app still exists in Intune
-    const existingApp = await getApp(graphToken, intuneAppId);
+    const existingApp = await getApp(graphToken, intuneAppId, tenantId);
 
     if (!existingApp) {
       return NextResponse.json(
@@ -118,12 +118,12 @@ export async function PATCH(
     // Apply assignments
     if (assignments) {
       const graphAssignments = convertToGraphAssignments(assignments);
-      await assignToGroups(graphToken, intuneAppId, graphAssignments);
+      await assignToGroups(graphToken, intuneAppId, graphAssignments, tenantId);
     }
 
     // Sync categories
     if (categories) {
-      await syncAppCategories(graphToken, intuneAppId, categories);
+      await syncAppCategories(graphToken, intuneAppId, categories, tenantId);
     }
 
     // Persist updated assignments/categories in the most recent packaging_jobs row

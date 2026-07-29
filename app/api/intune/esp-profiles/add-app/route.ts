@@ -119,7 +119,8 @@ export async function POST(request: NextRequest) {
         const { alreadyAdded } = await addAppToEspProfile(
           graphToken,
           profileId,
-          body.intuneAppId
+          body.intuneAppId,
+          tenantId
         );
         results.push({
           profileId,

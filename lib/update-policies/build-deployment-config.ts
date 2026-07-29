@@ -8,6 +8,7 @@
  */
 
 import { createServerClient } from '@/lib/supabase';
+import { getDatabase } from '@/lib/db';
 import { getCatalogSource } from '@/lib/catalog';
 import {
   generateDetectionRules,
@@ -261,7 +262,7 @@ export function parsePsadtConfig(packageConfig: unknown): DeploymentConfig['psad
  */
 export async function buildDefaultDeploymentConfig(
   // Kept for call-site compatibility; the catalog source owns client creation.
-  _supabase: ReturnType<typeof createServerClient>,
+  _supabase: ReturnType<typeof createServerClient> | null,
   wingetId: string,
   latestVersion: string
 ): Promise<DeploymentConfig | null> {
@@ -349,16 +350,26 @@ export async function buildDefaultDeploymentConfig(
  *    default config.
  */
 export type BuildDeploymentConfigResult =
-  | { status: 'ok'; deploymentConfig: DeploymentConfig; originalUploadHistoryId: string | null }
+  | {
+      status: 'ok';
+      deploymentConfig: DeploymentConfig;
+      originalUploadHistoryId: string | null;
+      /** The most recently deployed Intune app ID for this winget_id/tenant, if any. */
+      currentIntuneAppId: string | null;
+    }
   | { status: 'orphaned_job' }
   | { status: 'unavailable' };
 
 /**
  * Orchestrator: build a deployment config for an app, replicating the
  * trigger route's "no policy yet" branch.
+ *
+ * `supabase` is null in self-hosted SQLite mode (no app_update_policies table
+ * to short-circuit this via); the upload_history/packaging_jobs lookups then
+ * go through the DatabaseAdapter instead of raw Supabase queries.
  */
 export async function buildDeploymentConfigForApp(
-  supabase: ReturnType<typeof createServerClient>,
+  supabase: ReturnType<typeof createServerClient> | null,
   args: {
     userId: string;
     tenantId: string;
@@ -369,24 +380,48 @@ export async function buildDeploymentConfigForApp(
 ): Promise<BuildDeploymentConfigResult> {
   const { userId, tenantId, wingetId, latestVersion, globalCarryOver } = args;
 
-  // Get the original deployment config from upload_history
-  const { data: uploadHistory } = await supabase
-    .from('upload_history')
-    .select('id, packaging_job_id')
-    .eq('user_id', userId)
-    .eq('intune_tenant_id', tenantId)
-    .eq('winget_id', wingetId)
-    .order('deployed_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  // Get the most recent prior deployment of this app for this tenant.
+  let uploadHistoryId: string | null = null;
+  let packagingJobId: string | null = null;
+  let currentIntuneAppId: string | null = null;
 
-  if (uploadHistory?.packaging_job_id) {
-    // Has prior deployment: extract config from packaging job
-    const { data: packagingJob } = await supabase
-      .from('packaging_jobs')
-      .select('*')
-      .eq('id', uploadHistory.packaging_job_id)
+  if (supabase) {
+    const { data: uploadHistory } = await supabase
+      .from('upload_history')
+      .select('id, packaging_job_id, intune_app_id')
+      .eq('user_id', userId)
+      .eq('intune_tenant_id', tenantId)
+      .eq('winget_id', wingetId)
+      .order('deployed_at', { ascending: false })
+      .limit(1)
       .maybeSingle();
+
+    uploadHistoryId = uploadHistory?.id ?? null;
+    packagingJobId = uploadHistory?.packaging_job_id ?? null;
+    currentIntuneAppId = uploadHistory?.intune_app_id ?? null;
+  } else {
+    // SQLite mode: the adapter has no per-winget_id/tenant filter, so pull a
+    // generous batch (already sorted newest-first) and match client-side.
+    const history = await getDatabase().uploadHistory.getByUserId(userId, 500);
+    const match = history.find(
+      (h) => h.winget_id === wingetId && h.intune_tenant_id === tenantId
+    );
+    uploadHistoryId = match?.id ?? null;
+    packagingJobId = match?.packaging_job_id ?? null;
+    currentIntuneAppId = match?.intune_app_id ?? null;
+  }
+
+  if (packagingJobId) {
+    // Has prior deployment: extract config from packaging job
+    const packagingJob = supabase
+      ? (
+          await supabase
+            .from('packaging_jobs')
+            .select('*')
+            .eq('id', packagingJobId)
+            .maybeSingle()
+        ).data
+      : await getDatabase().jobs.getById(packagingJobId);
 
     if (!packagingJob) {
       // Prior deployment exists but its packaging job is gone.
@@ -427,7 +462,12 @@ export async function buildDeploymentConfigForApp(
       assignmentMigration,
     };
 
-    return { status: 'ok', deploymentConfig, originalUploadHistoryId: uploadHistory.id };
+    return {
+      status: 'ok',
+      deploymentConfig,
+      originalUploadHistoryId: uploadHistoryId,
+      currentIntuneAppId,
+    };
   }
 
   // No prior deployment: build config from curated catalog data
@@ -441,5 +481,10 @@ export async function buildDeploymentConfigForApp(
     return { status: 'unavailable' };
   }
 
-  return { status: 'ok', deploymentConfig: defaultConfig, originalUploadHistoryId: null };
+  return {
+    status: 'ok',
+    deploymentConfig: defaultConfig,
+    originalUploadHistoryId: null,
+    currentIntuneAppId: null,
+  };
 }

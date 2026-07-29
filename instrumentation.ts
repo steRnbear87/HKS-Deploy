@@ -25,12 +25,25 @@ const CHECK_INTERVAL_MS = 60 * 60 * 1000;
 // lib/device-health/bios-snapshot.ts).
 const BIOS_SNAPSHOT_BUDGET_MS = 4 * 60 * 1000;
 
+// Office location changes rarely (unlike BIOS, it's not tied to hardware
+// churn), so a much smaller per-tick budget is plenty - the "already
+// captured today" skip in lib/intune/user-office-location.ts means most
+// ticks do near-zero work once the fleet's users are fully captured.
+const OFFICE_LOCATION_BUDGET_MS = 2 * 60 * 1000;
+
+// windowsAutopilotDeviceIdentities is one paginated tenant-wide sweep (no
+// per-device fan-out, unlike BIOS), so a full resync every tick is cheap -
+// this budget is per-tenant, not a fleet-wide total.
+const AUTOPILOT_SNAPSHOT_BUDGET_MS = 60 * 1000;
+
 export async function register() {
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
 
   const { captureDueDeviceHealthSnapshots } = await import('@/lib/device-health/snapshot');
   const { captureDueAppInventorySnapshots } = await import('@/lib/device-health/app-inventory-snapshot');
   const { captureDueBiosSnapshots } = await import('@/lib/device-health/bios-snapshot');
+  const { captureDueOfficeLocations } = await import('@/lib/intune/user-office-location');
+  const { captureDueAutopilotSnapshots } = await import('@/lib/intune-reports/autopilot');
 
   const runCheck = async () => {
     try {
@@ -47,6 +60,16 @@ export async function register() {
       await captureDueBiosSnapshots(BIOS_SNAPSHOT_BUDGET_MS);
     } catch (error) {
       console.error('[bios-snapshot] Scheduled snapshot check failed:', error);
+    }
+    try {
+      await captureDueOfficeLocations(OFFICE_LOCATION_BUDGET_MS);
+    } catch (error) {
+      console.error('[user-office-location] Scheduled snapshot check failed:', error);
+    }
+    try {
+      await captureDueAutopilotSnapshots(AUTOPILOT_SNAPSHOT_BUDGET_MS);
+    } catch (error) {
+      console.error('[autopilot-snapshot] Scheduled snapshot check failed:', error);
     }
   };
 

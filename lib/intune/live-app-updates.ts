@@ -23,6 +23,7 @@ import {
   matchAppToWingetWithDatabase,
 } from '@/lib/app-matching';
 import { compareVersions, hasUpdate, normalizeVersion } from '@/lib/version-compare';
+import { fetchWithRetry, invalidateServicePrincipalToken } from '@/lib/intune/graph-client';
 import { isSelfUpdatingApp } from '@/lib/self-updating-apps';
 import { getCatalogSource } from '@/lib/catalog';
 import { isSupabaseConfigured } from '@/lib/supabase';
@@ -123,14 +124,17 @@ export async function fetchTenantAppInventory(
     `${GRAPH_API_BASE}/deviceAppManagement/mobileApps?$filter=isof('microsoft.graph.win32LobApp')&$top=100`;
 
   while (nextUrl) {
-    const graphResponse: Response = await fetch(nextUrl, {
+    const graphResponse: Response = await fetchWithRetry(nextUrl, {
       headers: {
         Authorization: `Bearer ${graphToken}`,
         'Content-Type': 'application/json',
       },
-    });
+    }, 3);
 
     if (!graphResponse.ok) {
+      if (graphResponse.status === 401) {
+        invalidateServicePrincipalToken(tenantId);
+      }
       const errorText = await graphResponse.text().catch(() => '');
       throw new GraphInventoryError('Failed to fetch apps from Intune', graphResponse.status, errorText);
     }

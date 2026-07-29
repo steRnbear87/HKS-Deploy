@@ -3,6 +3,7 @@
  * TypeScript interfaces for automated update management
  */
 
+import { parseVersion } from '@/lib/version-compare';
 import type { Json } from './database';
 import type { AppRelationship, DetectionRule, RequirementRule } from './intune';
 import type { PSADTConfig } from './psadt';
@@ -281,18 +282,12 @@ export const DEFAULT_SAFETY_CONFIG: AutoUpdateSafetyConfig = {
  * Helper function to determine update type from version strings
  */
 export function classifyUpdateType(fromVersion: string, toVersion: string): UpdateType {
-  const parseSimple = (v: string) => {
-    const match = v.match(/^(\d+)\.(\d+)\.?(\d+)?/);
-    if (!match) return { major: 0, minor: 0, patch: 0 };
-    return {
-      major: parseInt(match[1], 10) || 0,
-      minor: parseInt(match[2], 10) || 0,
-      patch: parseInt(match[3], 10) || 0,
-    };
-  };
-
-  const from = parseSimple(fromVersion);
-  const to = parseSimple(toVersion);
+  // Use the same parser compareVersions/hasUpdate are built on, rather than
+  // a second ad-hoc regex - that second parser didn't strip a leading "v",
+  // so "v2.0.0" -> "v3.0.0" parsed to all-zeros on both sides and a real
+  // major bump got recorded and reported as a "patch".
+  const from = parseVersion(fromVersion);
+  const to = parseVersion(toVersion);
 
   if (to.major > from.major) return 'major';
   if (to.minor > from.minor) return 'minor';
@@ -302,9 +297,12 @@ export function classifyUpdateType(fromVersion: string, toVersion: string): Upda
 /**
  * Helper to check if a policy allows auto-update
  */
-export function canAutoUpdate(policy: AppUpdatePolicy | null | undefined): boolean {
+export function canAutoUpdate(
+  policy: AppUpdatePolicy | null | undefined,
+  maxConsecutiveFailures: number = DEFAULT_SAFETY_CONFIG.maxConsecutiveFailures
+): boolean {
   if (!policy) return false;
-  return policy.policy_type === 'auto_update' && policy.is_enabled && policy.consecutive_failures < 3;
+  return policy.policy_type === 'auto_update' && policy.is_enabled && policy.consecutive_failures < maxConsecutiveFailures;
 }
 
 /**

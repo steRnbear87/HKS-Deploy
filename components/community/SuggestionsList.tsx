@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Loader2, Package, Clock, CheckCircle2, XCircle, Sparkles, ExternalLink } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { VoteButton } from './VoteButton';
@@ -69,8 +69,13 @@ export function SuggestionsList({
   const [totalPages, setTotalPages] = useState(1);
 
   const { getAccessToken } = useMicrosoftAuth();
+  const abortRef = useRef<AbortController | null>(null);
 
   const fetchSuggestions = useCallback(async () => {
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     setIsLoading(true);
     setError(null);
 
@@ -90,6 +95,7 @@ export function SuggestionsList({
 
       const response = await fetch(`/api/community/suggestions?${params}`, {
         headers,
+        signal: controller.signal,
       });
 
       if (!response.ok) {
@@ -97,18 +103,25 @@ export function SuggestionsList({
       }
 
       const data = await response.json();
+      if (controller.signal.aborted) return;
       setSuggestions(data.suggestions);
       setUserVotes(data.userVotes || []);
       setTotalPages(data.pagination.totalPages);
     } catch (err) {
+      if (controller.signal.aborted) return;
       setError(err instanceof Error ? err.message : 'An error occurred');
     } finally {
-      setIsLoading(false);
+      if (!controller.signal.aborted) {
+        setIsLoading(false);
+      }
     }
   }, [status, sort, page, limit, getAccessToken]);
 
   useEffect(() => {
     fetchSuggestions();
+    return () => {
+      abortRef.current?.abort();
+    };
   }, [fetchSuggestions]);
 
   const handleVoteChange = (suggestionId: string, newVotes: number, voted: boolean) => {

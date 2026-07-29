@@ -14,7 +14,7 @@ import { resolveTargetTenantId } from '@/lib/msp/tenant-resolution';
 import { checkStoredConsent } from '@/lib/msp/consent-cache';
 import { verifyTenantConsent } from '@/lib/msp/consent-verification';
 import { parseAccessToken } from '@/lib/auth-utils';
-import { getServicePrincipalToken } from '@/lib/intune/graph-client';
+import { getServicePrincipalToken, invalidateServicePrincipalToken, fetchWithRetry } from '@/lib/intune/graph-client';
 import type {
   DeviceCompliancePolicyState,
   DeviceConfigurationState,
@@ -93,12 +93,15 @@ interface NavFetchResult<T> {
   rows: T[];
 }
 
-async function fetchNavCollection<T>(url: string, token: string): Promise<NavFetchResult<T>> {
-  const response = await fetch(url, {
+async function fetchNavCollection<T>(url: string, token: string, tenantId: string): Promise<NavFetchResult<T>> {
+  const response = await fetchWithRetry(url, {
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-  });
+  }, 3);
 
   if (!response.ok) {
+    if (response.status === 401) {
+      invalidateServicePrincipalToken(tenantId);
+    }
     const bodyText = await response.text().catch(() => '');
     return { ok: false, status: response.status, bodyText, rows: [] };
   }
@@ -132,12 +135,14 @@ export async function GET(
       fetchNavCollection<DeviceCompliancePolicyState>(
         `${GRAPH_API_BASE}/deviceManagement/managedDevices/${encodedId}/deviceCompliancePolicyStates` +
           `?$select=id,displayName,state,platformType,version`,
-        token
+        token,
+        tenantId
       ),
       fetchNavCollection<DeviceConfigurationState>(
         `${GRAPH_API_BASE}/deviceManagement/managedDevices/${encodedId}/deviceConfigurationStates` +
           `?$select=id,displayName,state,platformType,version,settingCount`,
-        token
+        token,
+        tenantId
       ),
     ]);
 

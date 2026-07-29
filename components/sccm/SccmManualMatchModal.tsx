@@ -50,6 +50,8 @@ export function SccmManualMatchModal({
 
   // Search for packages with debounce
   useEffect(() => {
+    const controller = new AbortController();
+
     const searchPackages = async () => {
       if (!searchQuery || searchQuery.length < 2) {
         setSearchResults([]);
@@ -61,25 +63,37 @@ export function SccmManualMatchModal({
 
       try {
         const response = await fetch(
-          `/api/winget/search?q=${encodeURIComponent(searchQuery)}&limit=15`
+          `/api/winget/search?q=${encodeURIComponent(searchQuery)}&limit=15`,
+          { signal: controller.signal }
         );
+
+        if (controller.signal.aborted) return;
 
         if (response.ok) {
           const data = await response.json();
+          if (controller.signal.aborted) return;
           setSearchResults(data.packages || []);
         } else {
           setError('Failed to search packages');
         }
       } catch (err) {
+        if (controller.signal.aborted) return;
         console.error('Search error:', err);
         setError('Search failed. Please try again.');
       } finally {
-        setIsSearching(false);
+        if (!controller.signal.aborted) setIsSearching(false);
       }
     };
 
+    // A slower earlier search (e.g. searchQuery "a") can otherwise resolve
+    // after a faster later one (e.g. "ab") and overwrite its results -
+    // abort the in-flight request, not just the pending debounce timer,
+    // when a newer keystroke supersedes it.
     const debounce = setTimeout(searchPackages, 300);
-    return () => clearTimeout(debounce);
+    return () => {
+      clearTimeout(debounce);
+      controller.abort();
+    };
   }, [searchQuery]);
 
   const handleLink = async () => {

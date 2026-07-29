@@ -239,6 +239,10 @@ export default function UpdatesPage() {
         tenant_id: update.tenant_id,
       });
       router.push('/dashboard/uploads');
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : 'Failed to trigger the update. Please try again.'
+      );
     } finally {
       setUpdatingIds((prev) => {
         const next = new Set(prev);

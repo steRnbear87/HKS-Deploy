@@ -17,6 +17,24 @@
 export const DEFAULT_REGISTRY_MARKER_PATH = 'SOFTWARE\\HKS\\Apps';
 
 /**
+ * Strip characters that are unsafe to embed in a generated PowerShell string
+ * literal from a version string before it's written to (or compared against)
+ * the HKS App Deployment registry marker.
+ *
+ * This MUST produce the exact same output the marker-writer actually writes,
+ * or Intune's registry detection rule (built with generateDetectionRules'
+ * unsanitized `version`) can permanently disagree with the sanitized value
+ * PSADT wrote at install time, breaking the greaterThanOrEqual version
+ * comparison. Both packager/src/job-processor.ts's sanitizeVersion and
+ * .github/scripts/Create-PSADTPackage.ps1's marker-write step must apply
+ * this same character set - keep all three in sync.
+ */
+export function sanitizeMarkerVersion(version: string): string {
+  const cleaned = (version ?? '').replace(/[^A-Za-z0-9.\-_+~]/g, '').slice(0, 128);
+  return cleaned || version;
+}
+
+/**
  * Normalize a user-supplied registry marker path into a safe subpath under
  * the hive (e.g. 'SOFTWARE\\Contoso\\Apps').
  *

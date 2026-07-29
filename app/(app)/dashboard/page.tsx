@@ -29,10 +29,12 @@ import {
   RecentActivityList,
   PageHeader,
   DevicePlatformBreakdown,
+  DeviceRegionBreakdown,
   DeviceEncryptionRollup,
   DevicesDonutChart,
   FleetWindowsUpdateCard,
   TopInstalledAppsWidget,
+  ErrorBoundary,
 } from '@/components/dashboard';
 import { useUserSettings } from '@/components/providers/UserSettingsProvider';
 import { useDevices } from '@/hooks/use-devices';
@@ -44,6 +46,7 @@ import {
   summarizeDeviceEncryption,
   STALE_DAYS,
 } from '@/lib/intune/device-health';
+import { summarizeDeviceRegions } from '@/lib/intune/office-regions';
 import { getFirstName } from '@/lib/utils';
 import { T, Var } from 'gt-next';
 
@@ -86,6 +89,10 @@ export default function DashboardPage() {
   );
   const encryptionCounts = useMemo(
     () => (devicesData?.devices ? summarizeDeviceEncryption(devicesData.devices) : null),
+    [devicesData]
+  );
+  const regionCounts = useMemo(
+    () => (devicesData?.devices ? summarizeDeviceRegions(devicesData.devices) : null),
     [devicesData]
   );
   const [mounted, setMounted] = useState(false);
@@ -455,13 +462,31 @@ export default function DashboardPage() {
         <div className="space-y-4">
           <h2 className="text-lg font-semibold text-text-primary"><T>Fleet Overview</T></h2>
 
-          <DevicePlatformBreakdown counts={platformCounts} />
+          <ErrorBoundary fallbackTitle="Device platform breakdown failed to load">
+            <DevicePlatformBreakdown counts={platformCounts} />
+          </ErrorBoundary>
+
+          {regionCounts && (
+            <ErrorBoundary fallbackTitle="Device region breakdown failed to load">
+              <DeviceRegionBreakdown counts={regionCounts} />
+            </ErrorBoundary>
+          )}
 
           <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-4">
-            {encryptionCounts && <DeviceEncryptionRollup counts={encryptionCounts} />}
-            <DevicesDonutChart platformCounts={platformCounts} nonCompliantCount={deviceStats?.nonCompliant ?? 0} />
-            <FleetWindowsUpdateCard />
-            <TopInstalledAppsWidget />
+            {encryptionCounts && (
+              <ErrorBoundary fallbackTitle="Encryption compliance failed to load">
+                <DeviceEncryptionRollup counts={encryptionCounts} />
+              </ErrorBoundary>
+            )}
+            <ErrorBoundary fallbackTitle="Device breakdown failed to load">
+              <DevicesDonutChart platformCounts={platformCounts} nonCompliantCount={deviceStats?.nonCompliant ?? 0} />
+            </ErrorBoundary>
+            <ErrorBoundary fallbackTitle="Windows Update status failed to load">
+              <FleetWindowsUpdateCard />
+            </ErrorBoundary>
+            <ErrorBoundary fallbackTitle="Top installed apps failed to load">
+              <TopInstalledAppsWidget />
+            </ErrorBoundary>
           </div>
         </div>
       )}

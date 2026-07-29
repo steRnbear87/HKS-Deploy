@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import YAML from 'yaml';
 import { selectAppsToSync } from './select-apps';
+import { verifyCronSecret } from '@/lib/cron-auth';
 
 const GITHUB_RAW_BASE = 'https://raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests';
 const GITHUB_API_BASE = 'https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests';
@@ -39,9 +40,7 @@ interface CuratedAppUpdate {
 }
 
 export async function GET(request: Request) {
-  // Verify cron secret (Vercel adds this header for cron jobs)
-  const authHeader = request.headers.get('authorization');
-  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+  if (!verifyCronSecret(request)) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 

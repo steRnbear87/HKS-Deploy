@@ -6,7 +6,7 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
-import type { DatabaseAdapter, PackagingJob, UploadHistoryRecord, DeviceHealthSnapshot, FleetAppInventoryRow, UpdateCheckResultRecord, DeploymentDriftRecord, DeviceBiosInfoRecord, DeviceUpdateGroupRecord } from './types';
+import type { DatabaseAdapter, PackagingJob, UploadHistoryRecord, DeviceHealthSnapshot, FleetAppInventoryRow, UpdateCheckResultRecord, DeploymentDriftRecord, DeviceBiosInfoRecord, AutopilotDeviceSnapshotRecord, UserOfficeLocationRecord, DeviceUpdateGroupRecord } from './types';
 
 // Singleton database instance
 let db: Database.Database | null = null;
@@ -134,10 +134,18 @@ function initializeSchema(db: Database.Database): void {
       intune_app_id TEXT NOT NULL,
       intune_app_url TEXT,
       intune_tenant_id TEXT,
+      app_source TEXT DEFAULT 'win32',
       deployed_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (packaging_job_id) REFERENCES packaging_jobs(id)
     )
   `);
+
+  const existingUploadHistoryColumns = new Set(
+    (db.pragma('table_info(upload_history)') as Array<{ name: string }>).map((column) => column.name),
+  );
+  if (!existingUploadHistoryColumns.has('app_source')) {
+    db.exec(`ALTER TABLE upload_history ADD COLUMN app_source TEXT DEFAULT 'win32'`);
+  }
 
   // Create index for upload_history
   db.exec(`
@@ -255,8 +263,69 @@ function initializeSchema(db: Database.Database): void {
     )
   `);
 
+  // Battery/storage fields added after the table's initial release - same
+  // per-device hardwareInformation fetch already made for BIOS, just more
+  // columns kept from that one response (see bios-snapshot.ts).
+  const existingBiosColumns = new Set(
+    (db.pragma('table_info(device_bios_info)') as Array<{ name: string }>).map((column) => column.name),
+  );
+  const biosCompatibleColumns: Record<string, string> = {
+    battery_health_percentage: 'REAL',
+    battery_charge_cycles: 'INTEGER',
+    total_storage_bytes: 'INTEGER',
+    free_storage_bytes: 'INTEGER',
+  };
+  for (const [column, definition] of Object.entries(biosCompatibleColumns)) {
+    if (!existingBiosColumns.has(column)) {
+      db.exec(`ALTER TABLE device_bios_info ADD COLUMN ${column} ${definition}`);
+    }
+  }
+
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_device_bios_info_tenant ON device_bios_info(tenant_id);
+  `);
+
+  // Create autopilot_device_snapshots table - a current-state cache (one row
+  // per Autopilot device identity, upserted in place), same shape as
+  // device_bios_info: a live registration/enrollment snapshot, not a
+  // daily-accumulating time series.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS autopilot_device_snapshots (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      device_id TEXT NOT NULL,
+      serial_number TEXT,
+      group_tag TEXT,
+      manufacturer TEXT,
+      model TEXT,
+      enrollment_state TEXT NOT NULL,
+      deployment_profile_assignment_status TEXT NOT NULL,
+      last_contacted_at TEXT,
+      captured_at TEXT NOT NULL,
+      UNIQUE(tenant_id, device_id)
+    )
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_autopilot_device_snapshots_tenant ON autopilot_device_snapshots(tenant_id);
+  `);
+
+  // Create user_office_locations table - a current-state cache (one row per
+  // user, upserted in place), not a daily-accumulating snapshot. Keyed by
+  // user rather than device since many devices share a primary user.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS user_office_locations (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      user_principal_name TEXT NOT NULL,
+      office_location TEXT,
+      captured_at TEXT NOT NULL,
+      UNIQUE(tenant_id, user_principal_name)
+    )
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_user_office_locations_tenant ON user_office_locations(tenant_id);
   `);
 
   // Maps each device to its tool-managed single-device Entra ID group, since
@@ -991,16 +1060,34 @@ export const sqliteDb: DatabaseAdapter = {
       if (rows.length === 0) return;
       const database = getDb();
       const stmt = database.prepare(`
-        INSERT INTO device_bios_info (id, tenant_id, device_id, bios_version, captured_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO device_bios_info (
+          id, tenant_id, device_id, bios_version,
+          battery_health_percentage, battery_charge_cycles, total_storage_bytes, free_storage_bytes,
+          captured_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(tenant_id, device_id) DO UPDATE SET
           bios_version = excluded.bios_version,
+          battery_health_percentage = excluded.battery_health_percentage,
+          battery_charge_cycles = excluded.battery_charge_cycles,
+          total_storage_bytes = excluded.total_storage_bytes,
+          free_storage_bytes = excluded.free_storage_bytes,
           captured_at = excluded.captured_at
       `);
 
       const runUpsert = database.transaction(() => {
         for (const row of rows) {
-          stmt.run(crypto.randomUUID(), row.tenant_id, row.device_id, row.bios_version, row.captured_at);
+          stmt.run(
+            crypto.randomUUID(),
+            row.tenant_id,
+            row.device_id,
+            row.bios_version,
+            row.battery_health_percentage,
+            row.battery_charge_cycles,
+            row.total_storage_bytes,
+            row.free_storage_bytes,
+            row.captured_at
+          );
         }
       });
       runUpsert();
@@ -1028,6 +1115,111 @@ export const sqliteDb: DatabaseAdapter = {
     },
   },
 
+  autopilotDeviceSnapshots: {
+    async upsertMany(rows: Array<Omit<AutopilotDeviceSnapshotRecord, 'id'>>): Promise<void> {
+      if (rows.length === 0) return;
+      const database = getDb();
+      const stmt = database.prepare(`
+        INSERT INTO autopilot_device_snapshots (
+          id, tenant_id, device_id, serial_number, group_tag, manufacturer, model,
+          enrollment_state, deployment_profile_assignment_status, last_contacted_at, captured_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(tenant_id, device_id) DO UPDATE SET
+          serial_number = excluded.serial_number,
+          group_tag = excluded.group_tag,
+          manufacturer = excluded.manufacturer,
+          model = excluded.model,
+          enrollment_state = excluded.enrollment_state,
+          deployment_profile_assignment_status = excluded.deployment_profile_assignment_status,
+          last_contacted_at = excluded.last_contacted_at,
+          captured_at = excluded.captured_at
+      `);
+
+      const runUpsert = database.transaction(() => {
+        for (const row of rows) {
+          stmt.run(
+            crypto.randomUUID(),
+            row.tenant_id,
+            row.device_id,
+            row.serial_number,
+            row.group_tag,
+            row.manufacturer,
+            row.model,
+            row.enrollment_state,
+            row.deployment_profile_assignment_status,
+            row.last_contacted_at,
+            row.captured_at
+          );
+        }
+      });
+      runUpsert();
+    },
+
+    async getByTenantId(tenantId: string): Promise<AutopilotDeviceSnapshotRecord[]> {
+      const database = getDb();
+      const rows = database
+        .prepare('SELECT * FROM autopilot_device_snapshots WHERE tenant_id = ?')
+        .all(tenantId) as Record<string, unknown>[];
+      return rows as unknown as AutopilotDeviceSnapshotRecord[];
+    },
+
+    async pruneRemoved(tenantId: string, currentDeviceIds: string[]): Promise<number> {
+      const database = getDb();
+      if (currentDeviceIds.length === 0) {
+        const result = database.prepare('DELETE FROM autopilot_device_snapshots WHERE tenant_id = ?').run(tenantId);
+        return result.changes;
+      }
+      const placeholders = currentDeviceIds.map(() => '?').join(', ');
+      const result = database
+        .prepare(`DELETE FROM autopilot_device_snapshots WHERE tenant_id = ? AND device_id NOT IN (${placeholders})`)
+        .run(tenantId, ...currentDeviceIds);
+      return result.changes;
+    },
+  },
+
+  userOfficeLocations: {
+    async upsertMany(rows: Array<Omit<UserOfficeLocationRecord, 'id'>>): Promise<void> {
+      if (rows.length === 0) return;
+      const database = getDb();
+      const stmt = database.prepare(`
+        INSERT INTO user_office_locations (id, tenant_id, user_principal_name, office_location, captured_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(tenant_id, user_principal_name) DO UPDATE SET
+          office_location = excluded.office_location,
+          captured_at = excluded.captured_at
+      `);
+
+      const runUpsert = database.transaction(() => {
+        for (const row of rows) {
+          stmt.run(crypto.randomUUID(), row.tenant_id, row.user_principal_name, row.office_location, row.captured_at);
+        }
+      });
+      runUpsert();
+    },
+
+    async getByTenantId(tenantId: string): Promise<UserOfficeLocationRecord[]> {
+      const database = getDb();
+      const rows = database
+        .prepare('SELECT * FROM user_office_locations WHERE tenant_id = ?')
+        .all(tenantId) as Record<string, unknown>[];
+      return rows as unknown as UserOfficeLocationRecord[];
+    },
+
+    async pruneRemoved(tenantId: string, currentUserPrincipalNames: string[]): Promise<number> {
+      const database = getDb();
+      if (currentUserPrincipalNames.length === 0) {
+        const result = database.prepare('DELETE FROM user_office_locations WHERE tenant_id = ?').run(tenantId);
+        return result.changes;
+      }
+      const placeholders = currentUserPrincipalNames.map(() => '?').join(', ');
+      const result = database
+        .prepare(`DELETE FROM user_office_locations WHERE tenant_id = ? AND user_principal_name NOT IN (${placeholders})`)
+        .run(tenantId, ...currentUserPrincipalNames);
+      return result.changes;
+    },
+  },
+
   deviceUpdateGroups: {
     async getByDeviceId(tenantId: string, deviceId: string): Promise<DeviceUpdateGroupRecord | null> {
       const database = getDb();
@@ -1041,13 +1233,17 @@ export const sqliteDb: DatabaseAdapter = {
       const database = getDb();
       const id = crypto.randomUUID();
       const createdAt = new Date().toISOString();
+      // Deliberately does not update entra_group_id on conflict - a
+      // concurrent racer's insert must never overwrite an already-persisted
+      // group, so the first writer wins and a losing caller can detect the
+      // mismatch and clean up its own now-orphaned Entra group (see
+      // ensureDeviceUpdateGroup).
       database
         .prepare(
           `INSERT INTO device_update_groups (id, tenant_id, device_id, azure_ad_device_id, entra_group_id, created_at)
            VALUES (?, ?, ?, ?, ?, ?)
            ON CONFLICT(tenant_id, device_id) DO UPDATE SET
-             azure_ad_device_id = excluded.azure_ad_device_id,
-             entra_group_id = excluded.entra_group_id`
+             azure_ad_device_id = excluded.azure_ad_device_id`
         )
         .run(id, row.tenant_id, row.device_id, row.azure_ad_device_id, row.entra_group_id, createdAt);
       return (await sqliteDb.deviceUpdateGroups.getByDeviceId(row.tenant_id, row.device_id))!;

@@ -95,7 +95,7 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
 
     // Validate URL if provided
     if (body.url) {
-      const urlValidation = validateWebhookUrl(body.url);
+      const urlValidation = await validateWebhookUrl(body.url);
       if (!urlValidation.valid) {
         return NextResponse.json(
           { error: urlValidation.error || 'Invalid webhook URL' },
@@ -148,11 +148,15 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
       updateData.secret = body.secret;
     }
 
-    // Update webhook
+    // Update webhook - re-apply the ownership filter on the mutating query
+    // itself (matching DELETE below), not just on the preceding ownership
+    // check, so this row can never be updated for anyone but its owner even
+    // if the check above were ever changed or bypassed.
     const { data: webhook, error } = await supabase
       .from('webhook_configurations')
       .update(updateData)
       .eq('id', id)
+      .eq('user_id', user.userId)
       .select()
       .single();
 

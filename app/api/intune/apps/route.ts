@@ -9,10 +9,22 @@ import { resolveTargetTenantId } from '@/lib/msp/tenant-resolution';
 import { checkStoredConsent } from '@/lib/msp/consent-cache';
 import { verifyTenantConsent } from '@/lib/msp/consent-verification';
 import { parseAccessToken } from '@/lib/auth-utils';
-import { getServicePrincipalToken } from '@/lib/intune/graph-client';
+import { fetchWithRetry, getServicePrincipalToken, invalidateServicePrincipalToken } from '@/lib/intune/graph-client';
 import type { IntuneWin32App } from '@/types/inventory';
 
 const GRAPH_API_BASE = 'https://graph.microsoft.com/beta';
+
+export const maxDuration = 60;
+
+// Overall budget for the Graph pagination scan. Must leave headroom under
+// maxDuration so a throttled tenant gets a partial list instead of a hang -
+// mirrors app/api/intune/devices/route.ts's SCAN_BUDGET_MS.
+const SCAN_BUDGET_MS = 40_000;
+
+interface GraphFetchError extends Error {
+  status: number;
+  bodyText: string;
+}
 
 export async function GET(request: NextRequest) {
   try {
@@ -86,35 +98,77 @@ export async function GET(request: NextRequest) {
     // Note: We can't use $select with derived type fields when using isof filter
     // So we fetch all fields and let Graph API return the full win32LobApp objects
     const apps: IntuneWin32App[] = [];
+    let partial = false;
 
+    const scanDeadline = Date.now() + SCAN_BUDGET_MS;
     let nextUrl: string | null = `${GRAPH_API_BASE}/deviceAppManagement/mobileApps?$filter=isof('microsoft.graph.win32LobApp')&$orderby=displayName&$top=100`;
 
-    while (nextUrl) {
-      const graphResponse: Response = await fetch(nextUrl, {
-        headers: {
-          Authorization: `Bearer ${graphToken}`,
-          'Content-Type': 'application/json',
-        },
-      });
+    try {
+      while (nextUrl) {
+        if (Date.now() >= scanDeadline) {
+          partial = true;
+          break;
+        }
 
-      if (!graphResponse.ok) {
+        const graphResponse: Response = await fetchWithRetry(
+          nextUrl,
+          {
+            headers: {
+              Authorization: `Bearer ${graphToken}`,
+              'Content-Type': 'application/json',
+            },
+          },
+          3,
+          scanDeadline
+        );
+
+        if (!graphResponse.ok) {
+          if (graphResponse.status === 401) {
+            invalidateServicePrincipalToken(tenantId);
+          }
+          const bodyText = await graphResponse.text().catch(() => '');
+          const error = new Error(`Graph mobileApps ${graphResponse.status}`) as GraphFetchError;
+          error.status = graphResponse.status;
+          error.bodyText = bodyText;
+          throw error;
+        }
+
+        const graphData = await graphResponse.json();
+        const pageApps: IntuneWin32App[] = graphData.value || [];
+        apps.push(...pageApps);
+
+        // Check for next page
+        nextUrl = graphData['@odata.nextLink'] || null;
+      }
+    } catch (err) {
+      const graphError = err as GraphFetchError;
+      const budgetExhausted =
+        (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) ||
+        Date.now() >= scanDeadline;
+
+      if (budgetExhausted) {
+        partial = true;
+      } else {
+        if (graphError.status === 429) {
+          return NextResponse.json(
+            {
+              error: 'Microsoft Graph is throttling requests for this tenant. Please wait a minute and try again.',
+            },
+            { status: 429 }
+          );
+        }
+        console.error('Error fetching Intune apps:', err);
         return NextResponse.json(
           { error: 'Failed to fetch apps from Intune' },
-          { status: graphResponse.status }
+          { status: graphError.status && graphError.status >= 400 ? graphError.status : 502 }
         );
       }
-
-      const graphData = await graphResponse.json();
-      const pageApps: IntuneWin32App[] = graphData.value || [];
-      apps.push(...pageApps);
-
-      // Check for next page
-      nextUrl = graphData['@odata.nextLink'] || null;
     }
 
     return NextResponse.json({
       apps,
       count: apps.length,
+      partial,
     });
   } catch {
     return NextResponse.json(

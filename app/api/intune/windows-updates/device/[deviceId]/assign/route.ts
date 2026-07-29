@@ -148,14 +148,47 @@ export async function POST(
       body.deviceName
     );
 
-    const profiles = await ops.list(token);
-    for (const profile of profiles) {
-      if (profile.id === body.policyId) continue;
-      await removeGroupFromProfile(token, ops, profile.id, groupId);
-    }
-
+    // Add to the target profile FIRST, then remove from the others - each
+    // profile's assignment update is its own independent Graph call with no
+    // cross-call rollback, so a mid-loop failure is unavoidable. Ordering it
+    // this way means a failure leaves the device assigned to both the new
+    // and an old profile (over-assigned, easy to spot and re-run) rather
+    // than to neither (silently dropped out of update management, which is
+    // the worse failure mode). Collect per-profile errors instead of
+    // aborting on the first one, so the response tells the caller exactly
+    // which removals still need to be retried.
     if (body.policyId) {
       await addGroupToProfile(token, ops, body.policyId, groupId);
+    }
+
+    const profiles = await ops.list(token);
+    const failedToRemoveFrom: string[] = [];
+    for (const profile of profiles) {
+      if (profile.id === body.policyId) continue;
+      try {
+        await removeGroupFromProfile(token, ops, profile.id, groupId);
+      } catch (error) {
+        console.error(
+          `[POST /api/intune/windows-updates/device/[deviceId]/assign] Failed to remove group ${groupId} from profile ${profile.id}:`,
+          error
+        );
+        failedToRemoveFrom.push(profile.id);
+      }
+    }
+
+    if (failedToRemoveFrom.length > 0) {
+      // Use a non-2xx status (not 207) so the existing fetch().ok-based
+      // error handling in useAssignDeviceUpdatePolicy surfaces this instead
+      // of silently treating it as a full success.
+      return NextResponse.json(
+        {
+          success: false,
+          method: 'group',
+          error: 'Assigned the new policy, but failed to unassign one or more previous policies of the same type. Please try again.',
+          failedToRemoveFrom,
+        },
+        { status: 502 }
+      );
     }
 
     return NextResponse.json({ success: true, method: 'group' });

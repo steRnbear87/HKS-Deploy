@@ -137,13 +137,11 @@ function AppCardComponent({ package: pkg, onSelect, isDeployed = false, isBulkSe
             )}
           </div>
 
-          {pkg.description && (
-            <p className="text-text-secondary text-sm mt-3 line-clamp-2 leading-relaxed min-h-[2.75rem]">
-              {pkg.description}
-            </p>
-          )}
+          <p className="text-text-secondary text-sm mt-3 line-clamp-2 leading-relaxed min-h-[2.75rem]">
+            {pkg.description || ''}
+          </p>
 
-          <div className="flex items-center flex-wrap gap-1.5 mt-3">
+          <div className="flex items-center flex-wrap gap-1.5 mt-3 min-h-[1.5rem] max-h-[1.5rem] overflow-hidden">
             {pkg.appSource === 'store' && (
               <span className="text-xs font-medium text-violet-400 bg-violet-500/10 px-2 py-0.5 rounded-full border border-violet-500/20">
                 Store

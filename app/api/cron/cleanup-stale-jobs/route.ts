@@ -8,6 +8,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import { handleAutoUpdateJobCompletion } from '@/lib/auto-update/cleanup';
+import { verifyCronSecret } from '@/lib/cron-auth';
 import {
   STALE_JOB_TIMEOUT_MINUTES,
   INTERMEDIATE_STATES,
@@ -16,9 +17,7 @@ import {
 } from '@/lib/stale-jobs';
 
 export async function GET(request: Request) {
-  // Verify cron secret
-  const authHeader = request.headers.get('authorization');
-  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+  if (!verifyCronSecret(request)) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
@@ -66,6 +65,13 @@ export async function GET(request: Request) {
     // Mark stale jobs as failed
     const jobIds = confirmedStaleJobs.map((job) => job.id);
 
+    // Also require the job to STILL be in an intermediate state, not just
+    // matching by id - keepActuallyStaleJobs does an async GitHub-run
+    // reconciliation check between the initial SELECT above and this
+    // UPDATE, which is exactly the window a real completion callback could
+    // land in. Without this guard, that race would silently clobber a
+    // genuinely-deployed job's status back to "failed" with a misleading
+    // timeout message.
     const { error: updateError } = await supabase
       .from('packaging_jobs')
       .update({
@@ -74,7 +80,8 @@ export async function GET(request: Request) {
         completed_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       })
-      .in('id', jobIds);
+      .in('id', jobIds)
+      .in('status', INTERMEDIATE_STATES);
 
     if (updateError) {
       return NextResponse.json(

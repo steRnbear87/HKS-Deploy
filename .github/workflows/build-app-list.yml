@@ -202,6 +202,38 @@ jobs:
             // Transform packages to our schema
             // Index v2 format: { Name, PackageId, Version, Tags, LastUpdate }
 
+            // Lightweight, deterministic category inference from the index's own
+            // Tags field - no LLM call, so it costs nothing and runs on every
+            // sync. Deliberately not exhaustive: most of the ~14k packages carry
+            // no tags, or only hyper-specific/noisy ones (18.7k distinct raw tag
+            // values observed across the catalog), so most apps stay
+            // uncategorized. That's an accepted tradeoff for now rather than a
+            // bug - see the (currently unused) LLM-based categorize-apps.yml for
+            // a path to fuller coverage later.
+            const CATEGORY_TAG_RULES = [
+              { category: 'Browsers', tags: ['browser', 'web-browser', 'webbrowser', 'chromium', 'gecko', 'spidermonkey', 'firefox', 'mozilla', '浏览器', '网页浏览器', '火狐', '火狐浏览器'] },
+              { category: 'Development', tags: ['cli', 'terminal', 'editor', 'ide', 'programming', 'development', 'developer', 'sdk', 'git', 'compiler', 'debug', 'debugger', '编程', '开发'] },
+              { category: 'AI & Machine Learning', tags: ['ai', 'llm', 'chatgpt', 'gpt', 'machine-learning', 'copilot', 'deepseek', 'artificial-intelligence'] },
+              { category: 'Security', tags: ['security', 'antivirus', 'vpn', 'firewall', 'encryption', 'privacy'] },
+              { category: 'Networking', tags: ['network', 'networking', 'internet', 'ftp', 'ssh', 'proxy'] },
+              { category: 'File Management', tags: ['file', 'backup', 'sync', 'cloud', 'cloud-drive', 'netdisk', '备份', '同步', '云盘', '网盘', '文件'] },
+              { category: 'Audio', tags: ['audio', 'music', '音乐'] },
+              { category: 'Video', tags: ['video', 'media-player', 'streaming', '视频'] },
+              { category: 'Games', tags: ['game', 'gaming', '游戏'] },
+              { category: 'Email & Communication', tags: ['email', 'mail', 'chat', 'messenger', 'im'] },
+              { category: 'Productivity', tags: ['productivity', 'office', 'note', 'notes', 'markdown'] },
+              { category: 'Utilities', tags: ['utility', 'utilities', 'tool', 'tools', 'clipboard', 'clipboard-manager'] },
+            ];
+
+            function inferCategory(tags) {
+              if (!Array.isArray(tags) || tags.length === 0) return null;
+              const lower = new Set(tags.map(t => String(t).trim().toLowerCase()).filter(Boolean));
+              for (const rule of CATEGORY_TAG_RULES) {
+                if (rule.tags.some(t => lower.has(t))) return rule.category;
+              }
+              return null;
+            }
+
             // First pass: build a set of all package IDs so we can validate parents
             const allPackageIds = new Set(
               packages.map(pkg => pkg.PackageId || pkg.PackageIdentifier || '').filter(Boolean)
@@ -218,12 +250,18 @@ jobs:
               // Only mark as variant if the parent package also exists in the index
               const isVariant = localeInfo !== null && allPackageIds.has(localeInfo.parentId);
 
+              // Only set category when inference finds a match - omitting the key
+              // (rather than setting null) means Supabase upsert leaves any
+              // existing category value alone instead of clobbering it.
+              const inferredCategory = inferCategory(pkg.Tags);
+
               return {
                 winget_id: packageId,
                 name: pkg.Name || pkg.PackageName || packageId,
                 publisher: publisher,
                 latest_version: pkg.Version || null,
                 tags: pkg.Tags || [],
+                ...(inferredCategory ? { category: inferredCategory } : {}),
                 winget_last_update: pkg.LastUpdate || null,
                 is_verified: true, // Source is authoritative (winget-pkgs)
                 is_winget_verified: true,

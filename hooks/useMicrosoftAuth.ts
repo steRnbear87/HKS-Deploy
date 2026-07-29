@@ -1,7 +1,12 @@
 "use client";
 
 import { useMsal, useIsAuthenticated } from "@azure/msal-react";
-import { InteractionRequiredAuthError, AccountInfo } from "@azure/msal-browser";
+import {
+  InteractionRequiredAuthError,
+  AccountInfo,
+  AuthenticationResult,
+  IPublicClientApplication,
+} from "@azure/msal-browser";
 import { graphScopes, getAdminConsentUrl } from "@/lib/msal-config";
 import { useCallback, useRef, useEffect, useState } from "react";
 import { isTokenExpiringSoon, getTokenExpiryMinutes } from "@/lib/token-utils";
@@ -10,26 +15,52 @@ import { isTokenExpiringSoon, getTokenExpiryMinutes } from "@/lib/token-utils";
  * Hook to manage Microsoft authentication and access tokens
  * Provides sign-in, sign-out, and token management functionality
  */
-// Track sign-in to server for logging
+// Track sign-in to server for logging. The server writes this to an
+// authoritative permission-audit log, so it needs a verified Graph access
+// token rather than trusting client-supplied identity fields - reuse one
+// from a just-completed interactive sign-in when available, otherwise
+// acquire one silently for the existing-session (redirect/silent) path.
 async function trackSignInToServer(
+  instance: IPublicClientApplication,
   account: AccountInfo,
-  authMethod: 'popup' | 'redirect' | 'silent'
+  authMethod: 'popup' | 'redirect' | 'silent',
+  accessToken?: string
 ): Promise<void> {
   try {
+    const token =
+      accessToken ?? (await instance.acquireTokenSilent({ scopes: graphScopes, account })).accessToken;
     await fetch('/api/auth/track-signin', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        userId: account.localAccountId,
-        email: account.username,
-        name: account.name || null,
-        tenantId: account.tenantId,
-        authMethod,
-      }),
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ authMethod }),
     });
   } catch {
     // Silently fail - tracking shouldn't break auth flow
   }
+}
+
+/**
+ * Step-up to interactive auth via the redirect bridge (the /redirect page +
+ * broadcastResponseToMainFrame) rather than acquireTokenPopup. Popups are
+ * routinely blocked outright by managed-browser policies (seen in practice:
+ * silent on corporate Edge, fine on an unmanaged Firefox profile), which made
+ * token step-up fail with no usable signal - acquireTokenPopup just rejects.
+ * The redirect bridge drives the interactive step in a hidden auxiliary
+ * context instead of a popup window, so it isn't subject to popup blocking.
+ * acquireTokenRedirect's own promise resolves once the bridge round-trip
+ * completes (it does not tear down this page), but it resolves to void, so
+ * the actual token is fetched with a follow-up silent call against the
+ * now-cached account.
+ */
+async function acquireTokenViaRedirectBridge(
+  instance: IPublicClientApplication,
+  account: AccountInfo
+): Promise<AuthenticationResult> {
+  await instance.acquireTokenRedirect({ scopes: graphScopes, account });
+  return instance.acquireTokenSilent({ scopes: graphScopes, account });
 }
 
 export function useMicrosoftAuth() {
@@ -77,10 +108,7 @@ export function useMicrosoftAuth() {
     } catch (error) {
       if (error instanceof InteractionRequiredAuthError) {
         try {
-          const tokenResponse = await instance.acquireTokenPopup({
-            scopes: graphScopes,
-            account,
-          });
+          const tokenResponse = await acquireTokenViaRedirectBridge(instance, account);
 
           cachedTokenRef.current = tokenResponse.accessToken;
           tokenExpiryRef.current = tokenResponse.expiresOn?.getTime() || null;
@@ -130,10 +158,7 @@ export function useMicrosoftAuth() {
       } catch (error) {
         if (error instanceof InteractionRequiredAuthError) {
           try {
-            const tokenResponse = await instance.acquireTokenPopup({
-              scopes: graphScopes,
-              account,
-            });
+            const tokenResponse = await acquireTokenViaRedirectBridge(instance, account);
 
             cachedTokenRef.current = tokenResponse.accessToken;
             tokenExpiryRef.current = tokenResponse.expiresOn?.getTime() || null;
@@ -180,7 +205,7 @@ export function useMicrosoftAuth() {
       // Mark as tracked to prevent duplicate tracking
       hasTrackedSignInRef.current = account.localAccountId;
       // Track as redirect/silent since we're detecting an existing session
-      trackSignInToServer(account, 'silent');
+      trackSignInToServer(instance, account, 'silent');
     }
   }, [accounts]);
 
@@ -197,7 +222,7 @@ export function useMicrosoftAuth() {
         instance.setActiveAccount(result.account);
         document.cookie = 'msal-auth-hint=1; path=/; SameSite=Lax; max-age=86400';
         hasTrackedSignInRef.current = result.account.localAccountId;
-        await trackSignInToServer(result.account, 'popup');
+        await trackSignInToServer(instance, result.account, 'popup', result.accessToken);
       }
       return !!result;
     } catch {

@@ -31,6 +31,14 @@
     {
       "path": "/api/cron/device-bios-snapshot",
       "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/cron/device-office-location",
+      "schedule": "0 7 * * *"
+    },
+    {
+      "path": "/api/cron/autopilot-snapshot",
+      "schedule": "0 */2 * * *"
     }
   ]
 }

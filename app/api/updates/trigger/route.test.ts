@@ -175,7 +175,12 @@ describe('POST /api/updates/trigger', () => {
     });
   });
 
-  it('restores original policy fields when installer lookup fails', async () => {
+  it('never mutates policy_type/is_enabled when installer lookup fails', async () => {
+    // A manual trigger for a policy that isn't auto_update/enabled (e.g.
+    // 'notify', disabled) must never write 'auto_update'/enabled to the DB
+    // row - the cron's own eligibility query could otherwise see it mid-flight
+    // and independently trigger a second update for an app the user excluded.
+    // Bypassing the gate is done in-memory via skipPolicyGateCheck instead.
     const policy: AppUpdatePolicy = {
       id: 'policy-1',
       user_id: 'user-1',
@@ -215,13 +220,10 @@ describe('POST /api/updates/trigger', () => {
     expect(response.status).toBe(200);
     expect(body.success).toBe(false);
     expect(body.failed).toBe(1);
-    expect(policyUpdatePayloads).toEqual([
-      { policy_type: 'auto_update', is_enabled: true },
-      { policy_type: 'notify', is_enabled: false },
-    ]);
+    expect(policyUpdatePayloads).toEqual([]);
   });
 
-  it('restores original policy fields when trigger throws', async () => {
+  it('never mutates policy_type/is_enabled when trigger throws, and bypasses the gate in-memory', async () => {
     const policy: AppUpdatePolicy = {
       id: 'policy-1',
       user_id: 'user-1',
@@ -265,10 +267,12 @@ describe('POST /api/updates/trigger', () => {
     expect(body.success).toBe(false);
     expect(body.failed).toBe(1);
     expect(body.results[0].error).toContain('trigger crashed');
-    expect(policyUpdatePayloads).toEqual([
-      { policy_type: 'auto_update', is_enabled: true },
-      { policy_type: 'notify', is_enabled: false },
-    ]);
+    expect(policyUpdatePayloads).toEqual([]);
+    expect(triggerAutoUpdateMock).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'policy-1' }),
+      expect.anything(),
+      expect.objectContaining({ skipPolicyGateCheck: true })
+    );
   });
 
   it('forwards stored relationships and auto-supersedence to the packaging workflow', async () => {

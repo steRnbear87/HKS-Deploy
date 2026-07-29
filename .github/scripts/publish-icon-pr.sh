@@ -40,8 +40,13 @@ git stash pop
 git add public/icons/
 git commit -m "$commit_prefix for $icon_count apps"
 
-push_url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-git push "$push_url" "$branch"
+# Pass the token via a per-invocation HTTP header instead of embedding it in
+# the remote URL - a push failure (branch protection, expired token,
+# transient error) prints git's own error text including the remote URL, and
+# GitHub's secret redaction is a backstop, not something to rely on instead
+# of just not putting the token in the URL in the first place.
+git -c http.extraheader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)" \
+  push origin "$branch"
 
 pr_url=$(gh pr create \
   --base main \

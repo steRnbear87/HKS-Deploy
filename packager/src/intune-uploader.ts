@@ -205,91 +205,113 @@ export class IntuneUploader {
     const app = await this.createWin32App(graphClient, job);
     this.logger.info('Created Win32 LOB App', { appId: app.id });
 
-    // Step 2: Create content version (10%)
-    await onProgress?.(10, 'Creating content version...');
-    const contentVersion = await this.createContentVersion(graphClient, app.id);
-    this.logger.info('Created content version', { contentVersionId: contentVersion.id });
+    // Everything from here on can fail partway through; if it does, the
+    // duplicate guard above can never see this app again (it only matches
+    // published, committed apps), so it would otherwise sit in the tenant
+    // forever as an orphaned, half-created shell. Clean it up on any
+    // failure rather than leaving it behind.
+    try {
+      // Step 2: Create content version (10%)
+      await onProgress?.(10, 'Creating content version...');
+      const contentVersion = await this.createContentVersion(graphClient, app.id);
+      this.logger.info('Created content version', { contentVersionId: contentVersion.id });
 
-    // Step 3: Create content file (15%)
-    // Intune's mobileAppContentFile.size is the unencrypted content size and
-    // sizeEncrypted is the encrypted payload size; the encrypted payload (not
-    // the outer .intunewin) is what gets uploaded to Azure Storage.
-    await onProgress?.(15, 'Preparing file upload...');
+      // Step 3: Create content file (15%)
+      // Intune's mobileAppContentFile.size is the unencrypted content size and
+      // sizeEncrypted is the encrypted payload size; the encrypted payload (not
+      // the outer .intunewin) is what gets uploaded to Azure Storage.
+      await onProgress?.(15, 'Preparing file upload...');
 
-    const contentFile = await this.createContentFile(
-      graphClient,
-      app.id,
-      contentVersion.id,
-      path.basename(encryptedContentPath),
-      sizes.unencryptedSize,
-      sizes.encryptedSize
-    );
-    this.logger.info('Created content file', { contentFileId: contentFile.id });
+      const contentFile = await this.createContentFile(
+        graphClient,
+        app.id,
+        contentVersion.id,
+        path.basename(encryptedContentPath),
+        sizes.unencryptedSize,
+        sizes.encryptedSize
+      );
+      this.logger.info('Created content file', { contentFileId: contentFile.id });
 
-    // Step 4: Wait for Azure Storage URI (20%)
-    await onProgress?.(20, 'Waiting for upload location...');
-    const uploadInfo = await this.waitForAzureStorageUri(
-      graphClient,
-      app.id,
-      contentVersion.id,
-      contentFile.id
-    );
-    this.logger.info('Got Azure Storage URI');
+      // Step 4: Wait for Azure Storage URI (20%)
+      await onProgress?.(20, 'Waiting for upload location...');
+      const uploadInfo = await this.waitForAzureStorageUri(
+        graphClient,
+        app.id,
+        contentVersion.id,
+        contentFile.id
+      );
+      this.logger.info('Got Azure Storage URI');
 
-    // Step 5: Upload file chunks (25-80%)
-    await onProgress?.(25, 'Uploading package...');
-    await this.uploadFileChunks(
-      encryptedContentPath,
-      uploadInfo.azureStorageUri,
-      async (percent) => {
-        // Map chunk upload progress (0-100) to overall (25-80)
-        const mappedPercent = 25 + Math.floor(percent * 0.55);
-        await onProgress?.(mappedPercent, `Uploading package (${percent}%)...`);
+      // Step 5: Upload file chunks (25-80%)
+      await onProgress?.(25, 'Uploading package...');
+      await this.uploadFileChunks(
+        encryptedContentPath,
+        uploadInfo.azureStorageUri,
+        async (percent) => {
+          // Map chunk upload progress (0-100) to overall (25-80)
+          const mappedPercent = 25 + Math.floor(percent * 0.55);
+          await onProgress?.(mappedPercent, `Uploading package (${percent}%)...`);
+        }
+      );
+      this.logger.info('File chunks uploaded');
+
+      // Step 6: Commit file (85%)
+      await onProgress?.(85, 'Committing file...');
+      await this.commitFile(
+        graphClient,
+        app.id,
+        contentVersion.id,
+        contentFile.id,
+        encryptionInfo
+      );
+      this.logger.info('File committed');
+
+      // Step 7: Wait for processing (90%)
+      await onProgress?.(90, 'Processing package...');
+      await this.waitForFileProcessing(
+        graphClient,
+        app.id,
+        contentVersion.id,
+        contentFile.id
+      );
+      this.logger.info('File processing complete');
+
+      // Re-check for a duplicate immediately before committing, narrowing
+      // (though not eliminating - this is still a check-then-act race
+      // against another process) the window in which two concurrent
+      // uploads for the same app both pass the guard in uploadToIntune's
+      // step 0 and only one should actually go live.
+      if (!extractForceCreate(job.package_config)) {
+        const duplicate = await findDuplicateIntuneApp(graphClient, job);
+        if (duplicate && duplicate.existingAppId !== app.id) {
+          throw new DuplicateAppError(duplicate);
+        }
       }
-    );
-    this.logger.info('File chunks uploaded');
 
-    // Step 6: Commit file (85%)
-    await onProgress?.(85, 'Committing file...');
-    await this.commitFile(
-      graphClient,
-      app.id,
-      contentVersion.id,
-      contentFile.id,
-      encryptionInfo
-    );
-    this.logger.info('File committed');
+      // Step 8: Commit content version (95%)
+      await onProgress?.(95, 'Finalizing deployment...');
+      await this.commitContentVersion(graphClient, app.id, contentVersion.id);
+      this.logger.info('Content version committed');
 
-    // Step 7: Wait for processing (90%)
-    await onProgress?.(90, 'Processing package...');
-    await this.waitForFileProcessing(
-      graphClient,
-      app.id,
-      contentVersion.id,
-      contentFile.id
-    );
-    this.logger.info('File processing complete');
+      // Step 9: Add requirement rules, if present (98%)
+      await onProgress?.(98, 'Adding requirement rules...');
+      await this.addRequirementRules(graphClient, app.id, job);
 
-    // Step 8: Commit content version (95%)
-    await onProgress?.(95, 'Finalizing deployment...');
-    await this.commitContentVersion(graphClient, app.id, contentVersion.id);
-    this.logger.info('Content version committed');
+      // Step 10: Apply assignment configuration (99%)
+      await onProgress?.(99, 'Applying assignments...');
+      await this.applyAssignments(graphClient, app.id, job);
 
-    // Step 9: Add requirement rules, if present (98%)
-    await onProgress?.(98, 'Adding requirement rules...');
-    await this.addRequirementRules(graphClient, app.id, job);
+      // Step 11: Apply category configuration (99%)
+      await onProgress?.(99, 'Applying categories...');
+      await this.applyCategories(graphClient, app.id, job);
 
-    // Step 10: Apply assignment configuration (99%)
-    await onProgress?.(99, 'Applying assignments...');
-    await this.applyAssignments(graphClient, app.id, job);
-
-    // Step 11: Apply category configuration (99%)
-    await onProgress?.(99, 'Applying categories...');
-    await this.applyCategories(graphClient, app.id, job);
-
-    // Step 12: Apply app relationships (99%)
-    await onProgress?.(99, 'Applying app relationships...');
-    await this.applyRelationships(graphClient, app.id, job);
+      // Step 12: Apply app relationships (99%)
+      await onProgress?.(99, 'Applying app relationships...');
+      await this.applyRelationships(graphClient, app.id, job);
+    } catch (error) {
+      await this.deleteAppBestEffort(graphClient, app.id);
+      throw error;
+    }
 
     await onProgress?.(100, 'Upload complete');
 
@@ -300,6 +322,18 @@ export class IntuneUploader {
       displayName: job.display_name,
       url: appUrl,
     };
+  }
+
+  /** Best-effort cleanup for an app this upload attempt created but failed
+   * to finish (or lost a duplicate race on) - never throws, only logs, so a
+   * cleanup failure doesn't mask the real error that triggered it. */
+  private async deleteAppBestEffort(graphClient: GraphClient, appId: string): Promise<void> {
+    try {
+      await graphClient.delete(`/deviceAppManagement/mobileApps/${encodeURIComponent(appId)}`);
+      this.logger.info('Cleaned up incomplete/superseded app', { appId });
+    } catch (cleanupError) {
+      this.logger.error('Failed to clean up incomplete/superseded app', { appId, cleanupError });
+    }
   }
 
   /**

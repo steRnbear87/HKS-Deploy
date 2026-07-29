@@ -14,7 +14,7 @@ import { resolveTargetTenantId } from '@/lib/msp/tenant-resolution';
 import { checkStoredConsent } from '@/lib/msp/consent-cache';
 import { verifyTenantConsent } from '@/lib/msp/consent-verification';
 import { parseAccessToken } from '@/lib/auth-utils';
-import { getServicePrincipalToken } from '@/lib/intune/graph-client';
+import { getServicePrincipalToken, invalidateServicePrincipalToken, fetchWithRetry } from '@/lib/intune/graph-client';
 import type { DetectedApp, DeviceAppInventoryResponse } from '@/types/devices';
 
 const GRAPH_API_BASE = 'https://graph.microsoft.com/beta';
@@ -113,11 +113,14 @@ export async function GET(
       `?$select=id,displayName,version,publisher`;
 
     while (nextUrl && apps.length < MAX_APPS) {
-      const response = await fetch(nextUrl, {
+      const response = await fetchWithRetry(nextUrl, {
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      });
+      }, 3);
 
       if (!response.ok) {
+        if (response.status === 401) {
+          invalidateServicePrincipalToken(tenantId);
+        }
         if (response.status === 404) {
           return NextResponse.json({ error: 'Device not found' }, { status: 404 });
         }

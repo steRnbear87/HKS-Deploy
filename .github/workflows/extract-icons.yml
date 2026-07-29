@@ -210,6 +210,8 @@ jobs:
     needs: [extract-web-icons]
     timeout-minutes: 180
     if: >
+      always() &&
+      (needs.extract-web-icons.result == 'success' || needs.extract-web-icons.result == 'skipped') &&
       github.event.inputs.skip_binary != 'true' &&
       (github.event_name == 'workflow_dispatch' ||
        github.event_name == 'schedule' ||
@@ -285,7 +287,13 @@ jobs:
           async function getApps() {
             let query = supabase
               .from('curated_apps')
-              .select('winget_id, name, publisher, latest_version, icon_extraction_attempts, icon_source');
+              .select('winget_id, name, publisher, latest_version, icon_extraction_attempts, icon_source')
+              // Chocolatey packages already have their own icon from the
+              // Chocolatey feed and have no WinGet manifest to extract from -
+              // every extraction tier fails for them, permanently
+              // blacklisting them after 3 attempts. Same filter already
+              // applied to sync-manifests.yml/sync-chocolatey-catalog.yml.
+              .neq('app_source', 'chocolatey');
 
             if (appIds !== 'all') {
               const targetIds = appIds.split(',').map(id => id.trim());
@@ -343,8 +351,20 @@ jobs:
               console.log(`Found ${Object.keys(installerMap).length} installer URLs with trusted hashes from version_history`);
             }
 
+            // winget_id is committed to the database via the manifest sync
+            // pipeline and used verbatim below to build a filesystem path and
+            // an icon-commit directory - reject anything that isn't a plain
+            // Publisher.Package-style identifier before it can reach a path,
+            // so a malformed/malicious row can't traverse outside public/icons/.
+            const SAFE_WINGET_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+            const isSafeWingetId = (id) => typeof id === 'string' && SAFE_WINGET_ID.test(id) && !id.includes('..');
+
             const appsToProcess = [];
             for (const app of apps) {
+              if (!isSafeWingetId(app.winget_id)) {
+                console.warn(`Skipping app with unsafe winget_id: ${JSON.stringify(app.winget_id)}`);
+                continue;
+              }
               const iconDir = `public/icons/${app.winget_id}`;
               if (missingSizesOnly) {
                 // Process only if at least one target size is missing on disk.
@@ -409,6 +429,15 @@ jobs:
           foreach ($app in $apps) {
             $wingetId = $app.winget_id
             Write-Host "`n=== Processing $wingetId ===" -ForegroundColor Cyan
+
+            # Defense-in-depth: the JS step that wrote apps-to-process.json
+            # already filters to Publisher.Package-style ids, but this file
+            # is also a valid workflow_dispatch input target - re-validate
+            # here too before $wingetId is used to build a filesystem path.
+            if ($wingetId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$' -or $wingetId -match '\.\.') {
+              Write-Warning "Skipping app with unsafe winget_id: $wingetId"
+              continue
+            }
 
             $failureReason = $null
 
@@ -644,6 +673,19 @@ jobs:
 
           echo "extracted=$extracted" >> $env:GITHUB_OUTPUT
           echo "failed=$failed" >> $env:GITHUB_OUTPUT
+
+          # A handful of per-app failures (a deleted package, no binary icon
+          # available) is normal and already recorded above - it shouldn't
+          # fail the whole job. Only a high failure rate (a systemic problem:
+          # download host down, GitHub-wide rate limiting) should, since
+          # $ErrorActionPreference = 'Continue' plus an unconditional exit 0
+          # otherwise reported success even when every app in the batch failed.
+          $totalProcessed = $extracted + $failed
+          $failureRate = if ($totalProcessed -gt 0) { $failed / $totalProcessed } else { 0 }
+          if ($totalProcessed -gt 0 -and $failureRate -gt 0.5) {
+            Write-Error "Failure rate too high: $failed/$totalProcessed apps failed icon extraction"
+            exit 1
+          }
 
           exit 0
 

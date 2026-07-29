@@ -9,7 +9,7 @@ import { resolveTargetTenantId } from '@/lib/msp/tenant-resolution';
 import { checkStoredConsent } from '@/lib/msp/consent-cache';
 import { verifyTenantConsent } from '@/lib/msp/consent-verification';
 import { parseAccessToken } from '@/lib/auth-utils';
-import { getServicePrincipalToken } from '@/lib/intune/graph-client';
+import { getServicePrincipalToken, invalidateServicePrincipalToken, fetchWithRetry } from '@/lib/intune/graph-client';
 import type { ManagedDeviceDetail, ManagedDeviceDetailResponse } from '@/types/devices';
 
 // hardwareInformation and several other selected fields below don't exist on
@@ -119,17 +119,21 @@ export async function GET(
       return NextResponse.json({ error: 'Failed to get Graph API token' }, { status: 500 });
     }
 
-    const response = await fetch(
+    const response = await fetchWithRetry(
       `${GRAPH_API_BASE}/deviceManagement/managedDevices/${encodeURIComponent(id)}?$select=${DEVICE_DETAIL_SELECT}`,
       {
         headers: {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
-      }
+      },
+      3
     );
 
     if (!response.ok) {
+      if (response.status === 401) {
+        invalidateServicePrincipalToken(tenantId);
+      }
       if (response.status === 404) {
         return NextResponse.json({ error: 'Device not found' }, { status: 404 });
       }

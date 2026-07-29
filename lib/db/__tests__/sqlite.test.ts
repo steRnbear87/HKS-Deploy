@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
-import type { DatabaseAdapter, PackagingJob, UploadHistoryRecord, DeviceHealthSnapshot, FleetAppInventoryRow, UpdateCheckResultRecord, DeploymentDriftRecord, DeviceBiosInfoRecord, DeviceUpdateGroupRecord } from '../types';
+import type { DatabaseAdapter, PackagingJob, UploadHistoryRecord, DeviceHealthSnapshot, FleetAppInventoryRow, UpdateCheckResultRecord, DeploymentDriftRecord, DeviceBiosInfoRecord, AutopilotDeviceSnapshotRecord, UserOfficeLocationRecord, DeviceUpdateGroupRecord } from '../types';
 
 // Create an in-memory SQLite adapter for testing
 function createTestAdapter(): DatabaseAdapter & { close: () => void } {
@@ -169,8 +169,40 @@ function createTestAdapter(): DatabaseAdapter & { close: () => void } {
       tenant_id TEXT NOT NULL,
       device_id TEXT NOT NULL,
       bios_version TEXT,
+      battery_health_percentage REAL,
+      battery_charge_cycles INTEGER,
+      total_storage_bytes INTEGER,
+      free_storage_bytes INTEGER,
       captured_at TEXT NOT NULL,
       UNIQUE(tenant_id, device_id)
+    )
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS autopilot_device_snapshots (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      device_id TEXT NOT NULL,
+      serial_number TEXT,
+      group_tag TEXT,
+      manufacturer TEXT,
+      model TEXT,
+      enrollment_state TEXT NOT NULL,
+      deployment_profile_assignment_status TEXT NOT NULL,
+      last_contacted_at TEXT,
+      captured_at TEXT NOT NULL,
+      UNIQUE(tenant_id, device_id)
+    )
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS user_office_locations (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      user_principal_name TEXT NOT NULL,
+      office_location TEXT,
+      captured_at TEXT NOT NULL,
+      UNIQUE(tenant_id, user_principal_name)
     )
   `);
 
@@ -224,6 +256,17 @@ function createTestAdapter(): DatabaseAdapter & { close: () => void } {
           LIMIT ?
         `);
         const rows = stmt.all(userId, limit) as Record<string, unknown>[];
+        return rows.map(parseJobRow);
+      },
+
+      async getByTenantId(tenantId: string, limit: number = 50): Promise<PackagingJob[]> {
+        const stmt = db.prepare(`
+          SELECT * FROM packaging_jobs
+          WHERE tenant_id = ?
+          ORDER BY created_at DESC
+          LIMIT ?
+        `);
+        const rows = stmt.all(tenantId, limit) as Record<string, unknown>[];
         return rows.map(parseJobRow);
       },
 
@@ -742,14 +785,32 @@ function createTestAdapter(): DatabaseAdapter & { close: () => void } {
       async upsertMany(rows: Array<Omit<DeviceBiosInfoRecord, 'id'>>): Promise<void> {
         if (rows.length === 0) return;
         const stmt = db.prepare(`
-          INSERT INTO device_bios_info (id, tenant_id, device_id, bios_version, captured_at)
-          VALUES (?, ?, ?, ?, ?)
+          INSERT INTO device_bios_info (
+            id, tenant_id, device_id, bios_version,
+            battery_health_percentage, battery_charge_cycles, total_storage_bytes, free_storage_bytes,
+            captured_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(tenant_id, device_id) DO UPDATE SET
             bios_version = excluded.bios_version,
+            battery_health_percentage = excluded.battery_health_percentage,
+            battery_charge_cycles = excluded.battery_charge_cycles,
+            total_storage_bytes = excluded.total_storage_bytes,
+            free_storage_bytes = excluded.free_storage_bytes,
             captured_at = excluded.captured_at
         `);
         for (const row of rows) {
-          stmt.run(crypto.randomUUID(), row.tenant_id, row.device_id, row.bios_version, row.captured_at);
+          stmt.run(
+            crypto.randomUUID(),
+            row.tenant_id,
+            row.device_id,
+            row.bios_version,
+            row.battery_health_percentage,
+            row.battery_charge_cycles,
+            row.total_storage_bytes,
+            row.free_storage_bytes,
+            row.captured_at
+          );
         }
       },
       async getByTenantId(tenantId: string): Promise<DeviceBiosInfoRecord[]> {
@@ -771,6 +832,93 @@ function createTestAdapter(): DatabaseAdapter & { close: () => void } {
       },
     },
 
+    autopilotDeviceSnapshots: {
+      async upsertMany(rows: Array<Omit<AutopilotDeviceSnapshotRecord, 'id'>>): Promise<void> {
+        if (rows.length === 0) return;
+        const stmt = db.prepare(`
+          INSERT INTO autopilot_device_snapshots (
+            id, tenant_id, device_id, serial_number, group_tag, manufacturer, model,
+            enrollment_state, deployment_profile_assignment_status, last_contacted_at, captured_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(tenant_id, device_id) DO UPDATE SET
+            serial_number = excluded.serial_number,
+            group_tag = excluded.group_tag,
+            manufacturer = excluded.manufacturer,
+            model = excluded.model,
+            enrollment_state = excluded.enrollment_state,
+            deployment_profile_assignment_status = excluded.deployment_profile_assignment_status,
+            last_contacted_at = excluded.last_contacted_at,
+            captured_at = excluded.captured_at
+        `);
+        for (const row of rows) {
+          stmt.run(
+            crypto.randomUUID(),
+            row.tenant_id,
+            row.device_id,
+            row.serial_number,
+            row.group_tag,
+            row.manufacturer,
+            row.model,
+            row.enrollment_state,
+            row.deployment_profile_assignment_status,
+            row.last_contacted_at,
+            row.captured_at
+          );
+        }
+      },
+      async getByTenantId(tenantId: string): Promise<AutopilotDeviceSnapshotRecord[]> {
+        const rows = db
+          .prepare('SELECT * FROM autopilot_device_snapshots WHERE tenant_id = ?')
+          .all(tenantId) as Record<string, unknown>[];
+        return rows as unknown as AutopilotDeviceSnapshotRecord[];
+      },
+      async pruneRemoved(tenantId: string, currentDeviceIds: string[]): Promise<number> {
+        if (currentDeviceIds.length === 0) {
+          const result = db.prepare('DELETE FROM autopilot_device_snapshots WHERE tenant_id = ?').run(tenantId);
+          return result.changes;
+        }
+        const placeholders = currentDeviceIds.map(() => '?').join(', ');
+        const result = db
+          .prepare(`DELETE FROM autopilot_device_snapshots WHERE tenant_id = ? AND device_id NOT IN (${placeholders})`)
+          .run(tenantId, ...currentDeviceIds);
+        return result.changes;
+      },
+    },
+
+    userOfficeLocations: {
+      async upsertMany(rows: Array<Omit<UserOfficeLocationRecord, 'id'>>): Promise<void> {
+        if (rows.length === 0) return;
+        const stmt = db.prepare(`
+          INSERT INTO user_office_locations (id, tenant_id, user_principal_name, office_location, captured_at)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(tenant_id, user_principal_name) DO UPDATE SET
+            office_location = excluded.office_location,
+            captured_at = excluded.captured_at
+        `);
+        for (const row of rows) {
+          stmt.run(crypto.randomUUID(), row.tenant_id, row.user_principal_name, row.office_location, row.captured_at);
+        }
+      },
+      async getByTenantId(tenantId: string): Promise<UserOfficeLocationRecord[]> {
+        const rows = db
+          .prepare('SELECT * FROM user_office_locations WHERE tenant_id = ?')
+          .all(tenantId) as Record<string, unknown>[];
+        return rows as unknown as UserOfficeLocationRecord[];
+      },
+      async pruneRemoved(tenantId: string, currentUserPrincipalNames: string[]): Promise<number> {
+        if (currentUserPrincipalNames.length === 0) {
+          const result = db.prepare('DELETE FROM user_office_locations WHERE tenant_id = ?').run(tenantId);
+          return result.changes;
+        }
+        const placeholders = currentUserPrincipalNames.map(() => '?').join(', ');
+        const result = db
+          .prepare(`DELETE FROM user_office_locations WHERE tenant_id = ? AND user_principal_name NOT IN (${placeholders})`)
+          .run(tenantId, ...currentUserPrincipalNames);
+        return result.changes;
+      },
+    },
+
     deviceUpdateGroups: {
       async getByDeviceId(tenantId: string, deviceId: string): Promise<DeviceUpdateGroupRecord | null> {
         const row = db
@@ -785,8 +933,7 @@ function createTestAdapter(): DatabaseAdapter & { close: () => void } {
           `INSERT INTO device_update_groups (id, tenant_id, device_id, azure_ad_device_id, entra_group_id, created_at)
            VALUES (?, ?, ?, ?, ?, ?)
            ON CONFLICT(tenant_id, device_id) DO UPDATE SET
-             azure_ad_device_id = excluded.azure_ad_device_id,
-             entra_group_id = excluded.entra_group_id`
+             azure_ad_device_id = excluded.azure_ad_device_id`
         ).run(id, row.tenant_id, row.device_id, row.azure_ad_device_id, row.entra_group_id, createdAt);
         return (await adapter.deviceUpdateGroups.getByDeviceId(row.tenant_id, row.device_id))!;
       },

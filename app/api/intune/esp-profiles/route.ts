@@ -81,7 +81,7 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const profiles = await listEspProfiles(graphToken);
+    const profiles = await listEspProfiles(graphToken, tenantId);
 
     return NextResponse.json({
       profiles,

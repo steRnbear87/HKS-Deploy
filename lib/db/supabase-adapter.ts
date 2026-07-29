@@ -4,7 +4,7 @@
  */
 
 import { createServerClient } from '@/lib/supabase';
-import type { DatabaseAdapter, PackagingJob, UploadHistoryRecord, JobStats, DeviceHealthSnapshot, FleetAppInventoryRow, UpdateCheckResultRecord, DeploymentDriftRecord, DeviceBiosInfoRecord, DeviceUpdateGroupRecord } from './types';
+import type { DatabaseAdapter, PackagingJob, UploadHistoryRecord, JobStats, DeviceHealthSnapshot, FleetAppInventoryRow, UpdateCheckResultRecord, DeploymentDriftRecord, DeviceBiosInfoRecord, AutopilotDeviceSnapshotRecord, UserOfficeLocationRecord, DeviceUpdateGroupRecord } from './types';
 import type { PostgrestError } from '@supabase/supabase-js';
 
 /**
@@ -16,6 +16,51 @@ function isError(error: PostgrestError | null): error is PostgrestError {
 
 function isMissingArchiveColumn(error: PostgrestError | null): boolean {
   return Boolean(error?.message?.includes('archived_at'));
+}
+
+/**
+ * Quote a single value for use inside a PostgREST `in.(...)` filter list.
+ * Without this, a device id or UPN containing a comma, parenthesis, or
+ * quote breaks the filter syntax (or silently mis-matches), corrupting the
+ * prune step for that tenant.
+ */
+function quotePostgrestListValue(value: string): string {
+  return `"${value.replace(/"/g, '')}"`;
+}
+
+// PostgREST caps the rows returned by a single request (commonly 1000)
+// regardless of how many rows actually match. Any read that needs the
+// COMPLETE result set (not just one caller-facing page) must page through
+// with .range() itself rather than issuing one unbounded select() - a
+// fleet-sized tenant (thousands of devices) would otherwise silently get
+// truncated to the first page with no error or indication anything was cut.
+const SUPABASE_PAGE_SIZE = 1000;
+
+/**
+ * Fetch every row matching a query by paging through with .range() until a
+ * short page comes back, rather than trusting a single unbounded select()
+ * to return everything. `buildQuery(offset, limit)` must return a fresh
+ * query for that page each call (a Supabase query builder can't be re-used
+ * across multiple .range() calls).
+ */
+async function fetchAllRows<T>(
+  buildQuery: (offset: number, limit: number) => PromiseLike<{ data: T[] | null; error: PostgrestError | null }>
+): Promise<T[]> {
+  const allRows: T[] = [];
+  let offset = 0;
+  for (;;) {
+    const { data, error } = await buildQuery(offset, SUPABASE_PAGE_SIZE);
+    if (error) {
+      throw error;
+    }
+    const page = data ?? [];
+    allRows.push(...page);
+    if (page.length < SUPABASE_PAGE_SIZE) {
+      break;
+    }
+    offset += SUPABASE_PAGE_SIZE;
+  }
+  return allRows;
 }
 
 /**
@@ -114,9 +159,15 @@ export const supabaseDb: DatabaseAdapter = {
       const supabase = createServerClient();
       const query = getPackagingJobsQuery(supabase);
 
+      // Exclude archived rows before the LIMIT, not after (SQLite's
+      // equivalent query does this in its WHERE clause) - filtering
+      // client-side after an already-limited result can silently return
+      // fewer than `limit` rows whenever any of the most-recent rows
+      // happen to be archived.
       const { data, error } = await query
         .select('*')
         .eq('status', status)
+        .is('archived_at', null)
         .order('created_at', { ascending })
         .limit(limit);
 
@@ -125,7 +176,7 @@ export const supabaseDb: DatabaseAdapter = {
         throw error;
       }
 
-      return (data || []).filter((job) => !job.archived_at);
+      return data || [];
     },
 
     /**
@@ -165,6 +216,7 @@ export const supabaseDb: DatabaseAdapter = {
         .from('packaging_jobs')
         .select('*')
         .eq('user_id', userId)
+        .is('archived_at', null)
         .order('created_at', { ascending: false })
         .limit(limit);
 
@@ -173,7 +225,7 @@ export const supabaseDb: DatabaseAdapter = {
         throw error;
       }
 
-      return ((data as unknown as PackagingJob[]) || []).filter((job) => !job.archived_at);
+      return (data as unknown as PackagingJob[]) || [];
     },
 
     async getByTenantId(tenantId: string, limit: number = 50): Promise<PackagingJob[]> {
@@ -184,6 +236,7 @@ export const supabaseDb: DatabaseAdapter = {
         .from('packaging_jobs')
         .select('*')
         .eq('tenant_id', tenantId)
+        .is('archived_at', null)
         .order('created_at', { ascending: false })
         .limit(limit);
 
@@ -192,7 +245,7 @@ export const supabaseDb: DatabaseAdapter = {
         throw error;
       }
 
-      return ((data as unknown as PackagingJob[]) || []).filter((job) => !job.archived_at);
+      return (data as unknown as PackagingJob[]) || [];
     },
 
     /**
@@ -280,13 +333,16 @@ export const supabaseDb: DatabaseAdapter = {
     /**
      * Claim a job atomically (only if status is 'queued')
      */
-    async claim(jobId: string, _packagerId: string): Promise<PackagingJob | null> {
+    async claim(jobId: string, packagerId: string): Promise<PackagingJob | null> {
       const now = new Date().toISOString();
 
       return this.update(
         jobId,
         {
           status: 'packaging',
+          packager_id: packagerId,
+          packager_heartbeat_at: now,
+          claimed_at: now,
           packaging_started_at: now,
         },
         { status: 'queued' }
@@ -294,30 +350,23 @@ export const supabaseDb: DatabaseAdapter = {
     },
 
     /**
-     * Release a job back to queued state
+     * Release a job back to queued state - conditioned on packager_id
+     * ownership, matching the SQLite adapter, so a packager can only ever
+     * release a job it actually claimed rather than stealing one back from
+     * another in-flight packager.
      */
-    async release(jobId: string, _packagerId: string): Promise<PackagingJob | null> {
-      const supabase = createServerClient();
-      const query = getPackagingJobsQuery(supabase);
-
-      const { data, error } = await query
-        .update({
+    async release(jobId: string, packagerId: string): Promise<PackagingJob | null> {
+      return this.update(
+        jobId,
+        {
           status: 'queued',
+          packager_id: null,
+          packager_heartbeat_at: null,
+          claimed_at: null,
           packaging_started_at: null,
-        })
-        .eq('id', jobId)
-        .select()
-        .single();
-
-      if (isError(error)) {
-        if (error.code === 'PGRST116') {
-          return null;
-        }
-        console.error('Error releasing job:', error);
-        throw error;
-      }
-
-      return data;
+        },
+        { packager_id: packagerId }
+      );
     },
 
     /**
@@ -330,6 +379,9 @@ export const supabaseDb: DatabaseAdapter = {
       const { data, error } = await query
         .update({
           status: 'queued',
+          packager_id: null,
+          packager_heartbeat_at: null,
+          claimed_at: null,
           packaging_started_at: null,
         })
         .eq('id', jobId)
@@ -348,7 +400,11 @@ export const supabaseDb: DatabaseAdapter = {
     },
 
     /**
-     * Get stale jobs (packaging status with old heartbeat)
+     * Get stale jobs (packaging status with old heartbeat). Filters on
+     * packager_heartbeat_at, not packaging_started_at - the heartbeat is
+     * renewed throughout the run (see the packager's own PATCH /jobs calls),
+     * while packaging_started_at is set once at claim time, so filtering on
+     * it force-released jobs that were still actively heartbeating.
      */
     async getStaleJobs(staleThreshold: Date): Promise<PackagingJob[]> {
       const supabase = createServerClient();
@@ -357,7 +413,7 @@ export const supabaseDb: DatabaseAdapter = {
       const { data, error } = await query
         .select('*')
         .eq('status', 'packaging')
-        .lt('packaging_started_at', staleThreshold.toISOString());
+        .lt('packager_heartbeat_at', staleThreshold.toISOString());
 
       if (isError(error)) {
         console.error('Error fetching stale jobs:', error);
@@ -411,17 +467,24 @@ export const supabaseDb: DatabaseAdapter = {
     async deleteById(id: string): Promise<boolean> {
       const supabase = createServerClient();
 
-      const { error } = await supabase
+      // Same guard as lib/db/sqlite.ts: only count this as a real change
+      // (and only actually write) if the job wasn't already archived -
+      // without it, a nonexistent id or an already-archived job both
+      // silently reported success instead of the "nothing changed" false
+      // callers rely on to decide whether to update their own state.
+      const { data, error } = await supabase
         .from('packaging_jobs')
         .update({ archived_at: new Date().toISOString() })
-        .eq('id', id);
+        .eq('id', id)
+        .is('archived_at', null)
+        .select('id');
 
       if (isError(error)) {
         console.error('Error archiving job:', error);
         throw error;
       }
 
-      return true;
+      return (data as unknown[])?.length > 0;
     },
 
     /**
@@ -610,18 +673,25 @@ export const supabaseDb: DatabaseAdapter = {
     async getKnownTenantIds(): Promise<string[]> {
       const supabase = createServerClient();
 
-      const { data, error } = await supabase
-        .from('packaging_jobs')
-        .select('tenant_id')
-        .not('tenant_id', 'is', null);
-
-      if (isError(error)) {
+      let rows: Array<{ tenant_id: string | null }>;
+      try {
+        rows = await fetchAllRows<{ tenant_id: string | null }>((offset, limit) =>
+          supabase
+            .from('packaging_jobs')
+            .select('tenant_id')
+            .not('tenant_id', 'is', null)
+            .range(offset, offset + limit - 1) as unknown as PromiseLike<{
+            data: Array<{ tenant_id: string | null }> | null;
+            error: PostgrestError | null;
+          }>
+        );
+      } catch (error) {
         console.error('Error fetching known tenant IDs:', error);
         throw error;
       }
 
       const tenantIds = new Set<string>();
-      for (const row of (data as unknown as Array<{ tenant_id: string | null }>) || []) {
+      for (const row of rows) {
         if (row.tenant_id) tenantIds.add(row.tenant_id);
       }
       return Array.from(tenantIds);
@@ -636,26 +706,20 @@ export const supabaseDb: DatabaseAdapter = {
     ): Promise<void> {
       const supabase = createServerClient();
 
-      const { error: deleteError } = await supabase
-        .from('fleet_app_inventory')
-        .delete()
-        .eq('tenant_id', tenantId)
-        .eq('snapshot_date', snapshotDate);
+      // Delete-then-insert as one Postgres function call (single
+      // transaction), not two independent Supabase calls - otherwise an
+      // insert failure after a successful delete wipes a tenant's daily
+      // rollup with nothing replacing it. Matches the atomicity SQLite's
+      // adapter already gets from wrapping both in one transaction.
+      const { error } = await supabase.rpc('replace_fleet_app_inventory', {
+        p_tenant_id: tenantId,
+        p_snapshot_date: snapshotDate,
+        p_rows: rows,
+      });
 
-      if (isError(deleteError)) {
-        console.error('Error clearing prior fleet app inventory rows:', deleteError);
-        throw deleteError;
-      }
-
-      if (rows.length === 0) return;
-
-      const { error: insertError } = await supabase.from('fleet_app_inventory').insert(
-        rows.map((row) => ({ ...row, tenant_id: tenantId, snapshot_date: snapshotDate }))
-      );
-
-      if (isError(insertError)) {
-        console.error('Error inserting fleet app inventory rows:', insertError);
-        throw insertError;
+      if (isError(error)) {
+        console.error('Error replacing fleet app inventory rows:', error);
+        throw error;
       }
     },
 
@@ -715,9 +779,53 @@ export const supabaseDb: DatabaseAdapter = {
       if (rows.length === 0) return;
       const supabase = createServerClient();
 
+      // Supabase's upsert() always overwrites every column, unlike the
+      // SQLite adapter's ON CONFLICT DO UPDATE SET (sqlite.ts), which
+      // deliberately omits dismissed_at - so on Supabase the nightly
+      // re-check was silently clearing a user's earlier dismissal back to
+      // null. Read any existing dismissed_at first and carry it forward.
+      const userTenantPairs = Array.from(
+        new Set(rows.map((r) => `${r.user_id}::${r.tenant_id}`))
+      ).map((k) => {
+        const [user_id, tenant_id] = k.split('::');
+        return { user_id, tenant_id };
+      });
+
+      const existingDismissed = new Map<string, string>();
+      for (const { user_id, tenant_id } of userTenantPairs) {
+        const { data: existing, error: fetchError } = await supabase
+          .from('update_check_results')
+          .select('winget_id, intune_app_id, dismissed_at')
+          .eq('user_id', user_id)
+          .eq('tenant_id', tenant_id)
+          .not('dismissed_at', 'is', null);
+
+        if (isError(fetchError)) {
+          console.error('Error fetching existing dismissed_at for update check merge:', fetchError);
+          continue;
+        }
+        for (const row of (existing || []) as Array<{
+          winget_id: string;
+          intune_app_id: string;
+          dismissed_at: string;
+        }>) {
+          existingDismissed.set(
+            `${user_id}::${tenant_id}::${row.winget_id}::${row.intune_app_id}`,
+            row.dismissed_at
+          );
+        }
+      }
+
+      const rowsWithPreservedDismissal = rows.map((row) => {
+        const preserved = existingDismissed.get(
+          `${row.user_id}::${row.tenant_id}::${row.winget_id}::${row.intune_app_id}`
+        );
+        return preserved ? { ...row, dismissed_at: preserved } : row;
+      });
+
       const { error } = await supabase
         .from('update_check_results')
-        .upsert(rows, { onConflict: 'user_id,tenant_id,winget_id,intune_app_id' });
+        .upsert(rowsWithPreservedDismissal, { onConflict: 'user_id,tenant_id,winget_id,intune_app_id' });
 
       if (isError(error)) {
         console.error('Error upserting update check results:', error);
@@ -925,17 +1033,21 @@ export const supabaseDb: DatabaseAdapter = {
     async getByTenantId(tenantId: string): Promise<DeviceBiosInfoRecord[]> {
       const supabase = createServerClient();
 
-      const { data, error } = await supabase
-        .from('device_bios_info')
-        .select('*')
-        .eq('tenant_id', tenantId);
-
-      if (isError(error)) {
+      try {
+        return await fetchAllRows<DeviceBiosInfoRecord>((offset, limit) =>
+          supabase
+            .from('device_bios_info')
+            .select('*')
+            .eq('tenant_id', tenantId)
+            .range(offset, offset + limit - 1) as unknown as PromiseLike<{
+            data: DeviceBiosInfoRecord[] | null;
+            error: PostgrestError | null;
+          }>
+        );
+      } catch (error) {
         console.error('Error fetching device BIOS info:', error);
         throw error;
       }
-
-      return (data as unknown as DeviceBiosInfoRecord[]) || [];
     },
 
     async pruneRemoved(tenantId: string, currentDeviceIds: string[]): Promise<number> {
@@ -943,12 +1055,125 @@ export const supabaseDb: DatabaseAdapter = {
 
       let query = supabase.from('device_bios_info').delete().eq('tenant_id', tenantId);
       if (currentDeviceIds.length > 0) {
-        query = query.not('device_id', 'in', `(${currentDeviceIds.join(',')})`);
+        // Quote each id - unquoted values in a PostgREST in.() filter break
+        // (or silently mis-match) if any device id ever contains a comma,
+        // parenthesis, or quote.
+        query = query.not('device_id', 'in', `(${currentDeviceIds.map(quotePostgrestListValue).join(',')})`);
       }
       const { data, error } = await query.select('id');
 
       if (isError(error)) {
         console.error('Error pruning device BIOS info:', error);
+        throw error;
+      }
+
+      return (data as unknown[])?.length ?? 0;
+    },
+  },
+
+  autopilotDeviceSnapshots: {
+    async upsertMany(rows: Array<Omit<AutopilotDeviceSnapshotRecord, 'id'>>): Promise<void> {
+      if (rows.length === 0) return;
+      const supabase = createServerClient();
+
+      const { error } = await supabase
+        .from('autopilot_device_snapshots')
+        .upsert(rows, { onConflict: 'tenant_id,device_id' });
+
+      if (isError(error)) {
+        console.error('Error upserting Autopilot device snapshots:', error);
+        throw error;
+      }
+    },
+
+    async getByTenantId(tenantId: string): Promise<AutopilotDeviceSnapshotRecord[]> {
+      const supabase = createServerClient();
+
+      try {
+        return await fetchAllRows<AutopilotDeviceSnapshotRecord>((offset, limit) =>
+          supabase
+            .from('autopilot_device_snapshots')
+            .select('*')
+            .eq('tenant_id', tenantId)
+            .range(offset, offset + limit - 1) as unknown as PromiseLike<{
+            data: AutopilotDeviceSnapshotRecord[] | null;
+            error: PostgrestError | null;
+          }>
+        );
+      } catch (error) {
+        console.error('Error fetching Autopilot device snapshots:', error);
+        throw error;
+      }
+    },
+
+    async pruneRemoved(tenantId: string, currentDeviceIds: string[]): Promise<number> {
+      const supabase = createServerClient();
+
+      let query = supabase.from('autopilot_device_snapshots').delete().eq('tenant_id', tenantId);
+      if (currentDeviceIds.length > 0) {
+        query = query.not('device_id', 'in', `(${currentDeviceIds.map(quotePostgrestListValue).join(',')})`);
+      }
+      const { data, error } = await query.select('id');
+
+      if (isError(error)) {
+        console.error('Error pruning Autopilot device snapshots:', error);
+        throw error;
+      }
+
+      return (data as unknown[])?.length ?? 0;
+    },
+  },
+
+  userOfficeLocations: {
+    async upsertMany(rows: Array<Omit<UserOfficeLocationRecord, 'id'>>): Promise<void> {
+      if (rows.length === 0) return;
+      const supabase = createServerClient();
+
+      const { error } = await supabase
+        .from('user_office_locations')
+        .upsert(rows, { onConflict: 'tenant_id,user_principal_name' });
+
+      if (isError(error)) {
+        console.error('Error upserting user office locations:', error);
+        throw error;
+      }
+    },
+
+    async getByTenantId(tenantId: string): Promise<UserOfficeLocationRecord[]> {
+      const supabase = createServerClient();
+
+      try {
+        return await fetchAllRows<UserOfficeLocationRecord>((offset, limit) =>
+          supabase
+            .from('user_office_locations')
+            .select('*')
+            .eq('tenant_id', tenantId)
+            .range(offset, offset + limit - 1) as unknown as PromiseLike<{
+            data: UserOfficeLocationRecord[] | null;
+            error: PostgrestError | null;
+          }>
+        );
+      } catch (error) {
+        console.error('Error fetching user office locations:', error);
+        throw error;
+      }
+    },
+
+    async pruneRemoved(tenantId: string, currentUserPrincipalNames: string[]): Promise<number> {
+      const supabase = createServerClient();
+
+      let query = supabase.from('user_office_locations').delete().eq('tenant_id', tenantId);
+      if (currentUserPrincipalNames.length > 0) {
+        query = query.not(
+          'user_principal_name',
+          'in',
+          `(${currentUserPrincipalNames.map(quotePostgrestListValue).join(',')})`
+        );
+      }
+      const { data, error } = await query.select('id');
+
+      if (isError(error)) {
+        console.error('Error pruning user office locations:', error);
         throw error;
       }
 
@@ -978,18 +1203,50 @@ export const supabaseDb: DatabaseAdapter = {
     async upsert(row: Omit<DeviceUpdateGroupRecord, 'id' | 'created_at'>): Promise<DeviceUpdateGroupRecord> {
       const supabase = createServerClient();
 
-      const { data, error } = await supabase
+      // A concurrent racer's insert must never overwrite an already-persisted
+      // entra_group_id - the first writer's group must win so a losing
+      // caller can detect the mismatch and clean up its own now-orphaned
+      // Entra group (see ensureDeviceUpdateGroup). azure_ad_device_id can
+      // legitimately change on the losing path (e.g. the device re-enrolled
+      // and now reports a different Azure AD device id for the same
+      // tenant/device_id) and should still be kept current - matching
+      // lib/db/sqlite.ts's ON CONFLICT DO UPDATE SET azure_ad_device_id =
+      // excluded.azure_ad_device_id. Plain upsert({ ignoreDuplicates: true })
+      // can't express "update this one column, leave the rest" - Postgres
+      // DO NOTHING skips azure_ad_device_id too - so a conflict is handled
+      // as an explicit insert-then-targeted-update instead.
+      const { data: inserted, error: insertError } = await supabase
         .from('device_update_groups')
-        .upsert(row, { onConflict: 'tenant_id,device_id' })
+        .insert(row)
         .select('*')
-        .single();
+        .maybeSingle();
 
-      if (isError(error)) {
-        console.error('Error upserting device update group:', error);
-        throw error;
+      if (!insertError && inserted) {
+        return inserted as unknown as DeviceUpdateGroupRecord;
       }
 
-      return data as unknown as DeviceUpdateGroupRecord;
+      if (insertError && insertError.code !== '23505') {
+        console.error('Error upserting device update group:', insertError);
+        throw insertError;
+      }
+
+      const { data: updated, error: updateError } = await supabase
+        .from('device_update_groups')
+        .update({ azure_ad_device_id: row.azure_ad_device_id })
+        .eq('tenant_id', row.tenant_id)
+        .eq('device_id', row.device_id)
+        .select('*')
+        .maybeSingle();
+
+      if (isError(updateError)) {
+        console.error('Error updating device update group after conflict:', updateError);
+        throw updateError;
+      }
+
+      if (!updated) {
+        throw new Error('Device update group upsert conflicted but no existing row was found');
+      }
+      return updated as unknown as DeviceUpdateGroupRecord;
     },
   },
 };

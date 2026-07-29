@@ -58,7 +58,8 @@ IntuneGet requires two types of permissions:
 6. Search and add: `DeviceManagementServiceConfig.ReadWrite.All`
 7. Search and add: `DeviceManagementConfiguration.Read.All`
 8. Search and add: `GroupMember.Read.All`
-9. Click **Add permissions**
+9. Search and add: `User.Read.All` (optional - only needed for the Devices page's "Office location" column, which reads each primary user's Entra ID profile)
+10. Click **Add permissions**
 
 Your permissions should look like this:
 
@@ -70,6 +71,7 @@ Your permissions should look like this:
 | DeviceManagementServiceConfig.ReadWrite.All | Application | Requires admin consent |
 | DeviceManagementConfiguration.Read.All | Application | Requires admin consent |
 | GroupMember.Read.All | Application | Requires admin consent |
+| User.Read.All (optional) | Application | Requires admin consent |
 
 ## Create Client Secret
 

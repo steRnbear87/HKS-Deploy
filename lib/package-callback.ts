@@ -13,7 +13,7 @@ export const packageJobStatuses = [
 
 export type PackageJobStatus = (typeof packageJobStatuses)[number];
 
-const callbackStatuses = [
+export const callbackStatuses = [
   'packaging',
   'uploading',
   'deployed',

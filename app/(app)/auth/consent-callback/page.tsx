@@ -12,7 +12,7 @@ import { readPostAuthRedirect } from '@/lib/auth/post-auth-redirect';
 function ConsentCallbackContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { signIn, isAuthenticated, getAccessToken, refreshToken } = useMicrosoftAuth();
+  const { isAuthenticated, getAccessToken, refreshToken } = useMicrosoftAuth();
   const [status, setStatus] = useState<'processing' | 'verifying' | 'success' | 'error' | 'propagating'>('processing');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   // 'role': Microsoft rejected the consent request (often a missing admin role).
@@ -124,41 +124,16 @@ function ConsentCallbackContent() {
         return;
       }
 
-      // Not authenticated - try to sign in
-      setStatusMessage('Signing you in...');
-      try {
-        const success = await signIn();
-        if (cancelled) return;
-        if (success) {
-          setStatus('verifying');
-          setStatusMessage('Verifying organization access...');
-
-          const result = await verifyConsentAfterSignIn();
-          if (cancelled) return;
-          if (result.verified) {
-            markConsentGranted();
-            setStatus('success');
-            setStatusMessage('Your organization is now connected.');
-            setTimeout(() => {
-              if (!cancelled) router.push(onboardingSuccessUrl);
-            }, 1500);
-          } else {
-            handleVerificationFailure(result);
-          }
-        } else {
-          // Sign-in was cancelled - redirect to sign-in page without marking consent
-          setStatus('success');
-          setStatusMessage('Please sign in to continue.');
-          setTimeout(() => {
-            if (!cancelled) router.push('/auth/signin');
-          }, 1500);
-        }
-      } catch {
-        if (cancelled) return;
-        setStatus('error');
-        setErrorKind('verification');
-        setErrorMessage('Failed to complete sign in. Please try again.');
-      }
+      // Not authenticated. Hand off to /auth/signin rather than calling
+      // signIn() (loginPopup) here: this effect runs on page load with no
+      // user gesture behind it, and browsers - Edge in particular - reliably
+      // block popups opened that way while allowing the identical call from
+      // a real button click. /auth/signin already gates its popup behind a
+      // click and already knows how to verify consent and route correctly
+      // afterward, so this reuses that instead of duplicating a call that
+      // can't work from here.
+      setStatusMessage('Redirecting to sign in...');
+      router.push(`/auth/signin?callbackUrl=${encodeURIComponent(onboardingSuccessUrl)}`);
     };
 
     completeSetup();
@@ -166,7 +141,7 @@ function ConsentCallbackContent() {
     return () => {
       cancelled = true;
     };
-  }, [searchParams, signIn, isAuthenticated, router, verifyConsentAfterSignIn, onboardingSuccessUrl]);
+  }, [searchParams, isAuthenticated, router, verifyConsentAfterSignIn, onboardingSuccessUrl]);
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-bg-deepest">

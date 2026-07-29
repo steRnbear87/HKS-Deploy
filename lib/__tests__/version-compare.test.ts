@@ -66,4 +66,10 @@ describe('normalizeVersion', () => {
     expect(normalizeVersion('1.2')).toBe('1.2.0');
     expect(normalizeVersion(null)).toBe('0.0.0');
   });
+
+  it('preserves a 4th segment instead of truncating to three', () => {
+    expect(normalizeVersion('1.2.3.4')).toBe('1.2.3.4');
+    expect(normalizeVersion('1.2.3.4')).not.toBe(normalizeVersion('1.2.3.9'));
+    expect(compareVersions(normalizeVersion('1.2.3.4'), normalizeVersion('1.2.3.9'))).toBe(-1);
+  });
 });

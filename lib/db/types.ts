@@ -179,6 +179,54 @@ export interface DeviceBiosInfoRecord {
   tenant_id: string;
   device_id: string;
   bios_version: string | null;
+  /** Same per-device hardwareInformation payload the BIOS fetch already
+   * pulls - battery/storage fields are just additional columns kept from
+   * that one response, not a separate Graph call. */
+  battery_health_percentage: number | null;
+  battery_charge_cycles: number | null;
+  total_storage_bytes: number | null;
+  free_storage_bytes: number | null;
+  captured_at: string;
+}
+
+/**
+ * Current-state cache of each tenant's Windows Autopilot device identities
+ * (Graph's deviceManagement/windowsAutopilotDeviceIdentities), keyed one row
+ * per device - same "current state, not accumulating history" shape as
+ * DeviceBiosInfoRecord, since this is a live registration/enrollment status
+ * snapshot, not a time series. device_id is the Autopilot device identity's
+ * own Graph id (a distinct GUID from the managedDevice id used elsewhere).
+ */
+export interface AutopilotDeviceSnapshotRecord {
+  id: string;
+  tenant_id: string;
+  device_id: string;
+  serial_number: string | null;
+  group_tag: string | null;
+  manufacturer: string | null;
+  model: string | null;
+  enrollment_state: string;
+  deployment_profile_assignment_status: string;
+  last_contacted_at: string | null;
+  captured_at: string;
+}
+
+/**
+ * Current-state cache of each Entra ID user's office location, keyed one row
+ * per user (not per device - many devices share a primary user, so caching
+ * by user_principal_name instead of device_id avoids refetching the same
+ * profile once per device). Mirrors DeviceBiosInfoRecord's "row exists ==
+ * already checked" semantics: `office_location: null` means Graph was
+ * queried and the user genuinely has no office location set, not "not yet
+ * captured". user_principal_name is stored lowercased for case-insensitive
+ * lookup (Graph UPNs are case-insensitive but device records may not match
+ * the casing Graph returns for the user object).
+ */
+export interface UserOfficeLocationRecord {
+  id: string;
+  tenant_id: string;
+  user_principal_name: string;
+  office_location: string | null;
   captured_at: string;
 }
 
@@ -404,6 +452,35 @@ export interface DatabaseAdapter {
     /** Deletes cached rows for devices no longer in the tenant's live fleet
      * (retired/removed) - this table has no date column to prune by age. */
     pruneRemoved(tenantId: string, currentDeviceIds: string[]): Promise<number>;
+  };
+
+  autopilotDeviceSnapshots: {
+    /** Upsert on (tenant_id, device_id). */
+    upsertMany(rows: Array<Omit<AutopilotDeviceSnapshotRecord, 'id'>>): Promise<void>;
+
+    /** One bulk read per tenant - used both by the capture job and the
+     * Autopilot report route. Never do per-device lookups here. */
+    getByTenantId(tenantId: string): Promise<AutopilotDeviceSnapshotRecord[]>;
+
+    /** Deletes cached rows for Autopilot device identities no longer
+     * returned by Graph (deregistered) - this table has no date column to
+     * prune by age. */
+    pruneRemoved(tenantId: string, currentDeviceIds: string[]): Promise<number>;
+  };
+
+  userOfficeLocations: {
+    /** Upsert on (tenant_id, user_principal_name). */
+    upsertMany(rows: Array<Omit<UserOfficeLocationRecord, 'id'>>): Promise<void>;
+
+    /** One bulk read per tenant - used both by the capture job (to compute
+     * "already captured today") and the devices list route's join. Never
+     * do per-user lookups here. */
+    getByTenantId(tenantId: string): Promise<UserOfficeLocationRecord[]>;
+
+    /** Deletes cached rows for users no longer the primary user of any
+     * device in the tenant's live fleet - this table has no date column to
+     * prune by age. */
+    pruneRemoved(tenantId: string, currentUserPrincipalNames: string[]): Promise<number>;
   };
 
   deviceUpdateGroups: {

@@ -93,6 +93,10 @@ export function useUnmanagedApps(): UseUnmanagedAppsReturn {
   const addItemSilent = useCartStore((state) => state.addItemSilent);
   const cartItems = useCartStore((state) => state.items);
   const tokenRef = useRef<string | null>(null);
+  // Guards against a stale response landing after a newer request (e.g.
+  // rapid tenant switching in MSP mode, or refresh clicked mid-load) and
+  // overwriting the current tenant's data with an older tenant's.
+  const fetchAbortRef = useRef<AbortController | null>(null);
   const mspHeaders = useMemo<Record<string, string>>(() => {
     const headers: Record<string, string> = {};
 
@@ -139,10 +143,16 @@ export function useUnmanagedApps(): UseUnmanagedAppsReturn {
 
   // Fetch unmanaged apps. Returns true on success, false on failure.
   const fetchApps = useCallback(async (forceRefresh = false): Promise<boolean> => {
+    // Cancel any still-in-flight fetch so its response can't land after
+    // (and overwrite the result of) this newer one.
+    fetchAbortRef.current?.abort();
+    const controller = new AbortController();
+    fetchAbortRef.current = controller;
+
     setError(null);
     const accessToken = await getToken();
     if (!accessToken) {
-      setError('Authentication failed. Please sign in again.');
+      if (!controller.signal.aborted) setError('Authentication failed. Please sign in again.');
       return false;
     }
 
@@ -151,16 +161,19 @@ export function useUnmanagedApps(): UseUnmanagedAppsReturn {
       // Hard client-side timeout: the route bounds its own scan, but if the
       // request itself stalls the page must not spin forever.
       const response = await fetch(url, {
-        signal: AbortSignal.timeout(120_000),
+        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(120_000)]),
         headers: {
           Authorization: `Bearer ${accessToken}`,
           ...mspHeaders,
         },
       });
 
+      if (controller.signal.aborted) return false;
+
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
 
+        if (controller.signal.aborted) return false;
         if (response.status === 403 && errorData.permissionRequired) {
           setPermissionError(errorData.permissionRequired);
           return false;
@@ -169,8 +182,10 @@ export function useUnmanagedApps(): UseUnmanagedAppsReturn {
         throw new Error(errorData.error || 'Failed to fetch unmanaged apps');
       }
 
-      setPermissionError(null);
       const data: UnmanagedAppsResponse = await response.json();
+      if (controller.signal.aborted) return false;
+
+      setPermissionError(null);
       setApps(data.apps);
       setLastSynced(data.lastSynced);
       setFromCache(data.fromCache);
@@ -178,6 +193,7 @@ export function useUnmanagedApps(): UseUnmanagedAppsReturn {
       setStaleReason(data.stale === true ? data.staleReason ?? null : null);
       return true;
     } catch (err) {
+      if (controller.signal.aborted) return false;
       console.error('Error fetching unmanaged apps:', err);
       const timedOut =
         err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');

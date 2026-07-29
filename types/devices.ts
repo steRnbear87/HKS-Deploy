@@ -46,6 +46,8 @@ export interface ManagedDevice {
   /** Joined in from the device_bios_info cache table server-side (see app/api/intune/devices/route.ts) - not a Graph field on this endpoint. Null until the BIOS snapshot job has captured this device. */
   biosVersion: string | null;
   biosCapturedAt: string | null;
+  /** Joined in from the user_office_locations cache table server-side (see app/api/intune/devices/route.ts), keyed by this device's userPrincipalName - not a Graph field on this endpoint. The primary user's Entra ID `officeLocation` (populated from on-prem AD's physicalDeliveryOfficeName via AD Connect where applicable). Null until the office-location snapshot job has captured this device's primary user, or if the device has no primary user. */
+  officeLocation: string | null;
   /** Entra ID device object's `deviceId` GUID - needed to target this device with a dedicated Windows Update group (lib/intune/device-update-groups.ts). Null for devices with no Entra ID device record. */
   azureADDeviceId: string | null;
 }
@@ -202,6 +204,21 @@ export interface DeviceLogCollectionListResponse {
 
 export interface DeviceLogDownloadUrlResponse {
   url: string;
+}
+
+/** Simple remote actions with no meaningful response body beyond success. */
+export type DeviceRemoteAction = 'sync' | 'reboot' | 'shutdown';
+
+export interface DeviceNotifyRequest {
+  action: 'notify';
+  notificationTitle: string;
+  notificationBody: string;
+}
+
+export type DeviceActionRequest = { action: DeviceRemoteAction } | DeviceNotifyRequest;
+
+export interface DeviceActionResponse {
+  success: true;
 }
 
 /**

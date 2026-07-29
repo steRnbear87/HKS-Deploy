@@ -68,4 +68,5 @@ packager/work/
 packager/tools/
 packager/.env
 packager/.env.*
+packager/logs/
 supabase/.temp/

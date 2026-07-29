@@ -244,7 +244,12 @@ export function verifyConsentState(state: string): { mspOrgId: string; tenantRec
       .digest('hex')
       .substring(0, 16);
 
-    if (signature !== expectedSignature) {
+    const signatureBuffer = Buffer.from(signature, 'hex');
+    const expectedBuffer = Buffer.from(expectedSignature, 'hex');
+    if (
+      signatureBuffer.length !== expectedBuffer.length ||
+      !crypto.timingSafeEqual(signatureBuffer, expectedBuffer)
+    ) {
       console.warn('Consent state signature mismatch');
       return null;
     }

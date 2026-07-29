@@ -227,6 +227,9 @@ export interface CatalogSource {
   /** curated_apps select('*') + version_history versions + get_locale_variants. */
   getAppByWingetId(wingetId: string): Promise<CuratedAppWithDetails | null>;
 
+  /** Standalone locale-variants lookup (get_locale_variants / the SQLite equivalent), independent of a full app-detail fetch. */
+  getLocaleVariants(parentWingetId: string): Promise<LocaleVariant[]>;
+
   /** version_history select('version') ordered by created_at desc. */
   getVersions(wingetId: string): Promise<string[]>;
 

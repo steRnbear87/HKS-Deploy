@@ -91,7 +91,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Validate URL
-    const urlValidation = validateWebhookUrl(body.url);
+    const urlValidation = await validateWebhookUrl(body.url);
     if (!urlValidation.valid) {
       return NextResponse.json(
         { error: urlValidation.error || 'Invalid webhook URL' },

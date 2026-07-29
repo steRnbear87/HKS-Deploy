@@ -118,6 +118,9 @@ export default function MigrationDetailPage({ params }: PageProps) {
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
   const [manualMatchApp, setManualMatchApp] = useState<SccmAppRow | null>(null);
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Guards against a stale fetchApps response (from a superseded filter/sort/
+  // page combination) landing after a newer one and overwriting its result.
+  const fetchAppsAbortRef = useRef<AbortController | null>(null);
 
   const fetchMigration = useCallback(async () => {
     try {
@@ -138,6 +141,10 @@ export default function MigrationDetailPage({ params }: PageProps) {
   }, [getAccessToken, resolvedParams.migrationId]);
 
   const fetchApps = useCallback(async (showRefreshing = false) => {
+    fetchAppsAbortRef.current?.abort();
+    const controller = new AbortController();
+    fetchAppsAbortRef.current = controller;
+
     if (showRefreshing) setIsRefreshing(true);
 
     try {
@@ -157,19 +164,26 @@ export default function MigrationDetailPage({ params }: PageProps) {
 
       const response = await fetch(`/api/sccm/match?${params}`, {
         headers: { Authorization: `Bearer ${accessToken}` },
+        signal: controller.signal,
       });
 
+      if (controller.signal.aborted) return;
       if (!response.ok) throw new Error('Failed to fetch apps');
 
       const data = await response.json();
+      if (controller.signal.aborted) return;
+
       setApps(data.apps || []);
       setTotal(data.total || 0);
       setError(null);
     } catch (err) {
+      if (controller.signal.aborted) return;
       setError(err instanceof Error ? err.message : 'Failed to fetch apps');
     } finally {
-      setIsLoading(false);
-      setIsRefreshing(false);
+      if (!controller.signal.aborted) {
+        setIsLoading(false);
+        setIsRefreshing(false);
+      }
     }
   }, [getAccessToken, resolvedParams.migrationId, debouncedSearch, matchStatusFilter, offset, sortBy, sortDir]);
 
@@ -216,8 +230,34 @@ export default function MigrationDetailPage({ params }: PageProps) {
 
       if (!response.ok) throw new Error('Failed to run matching');
 
-      // Start polling for progress
+      // Start polling for progress. Bounded on two axes so a backend bug
+      // (a migration stuck in 'matching' forever, or a persistent fetch
+      // failure) can't leave this spinning silently forever: a wall-clock
+      // cap, and a cap on consecutive fetch failures.
+      const pollStartedAt = Date.now();
+      const MAX_POLL_DURATION_MS = 10 * 60 * 1000;
+      const MAX_CONSECUTIVE_FAILURES = 5;
+      let consecutiveFailures = 0;
+
+      const stopPolling = (message?: string) => {
+        if (pollIntervalRef.current) {
+          clearInterval(pollIntervalRef.current);
+          pollIntervalRef.current = null;
+        }
+        setIsMatching(false);
+        setMatchProgress(null);
+        if (message) {
+          setError(message);
+          toast.error(message);
+        }
+      };
+
       pollIntervalRef.current = setInterval(async () => {
+        if (Date.now() - pollStartedAt > MAX_POLL_DURATION_MS) {
+          stopPolling('Matching is taking longer than expected. Refresh the page to check its current status.');
+          return;
+        }
+
         try {
           const token = await getAccessToken();
           if (!token) return;
@@ -228,17 +268,13 @@ export default function MigrationDetailPage({ params }: PageProps) {
           );
 
           if (progressRes.ok) {
+            consecutiveFailures = 0;
             const progressData = await progressRes.json();
             const mig = progressData.migration;
 
             if (mig && mig.status !== 'matching') {
               // Matching complete
-              if (pollIntervalRef.current) {
-                clearInterval(pollIntervalRef.current);
-                pollIntervalRef.current = null;
-              }
-              setIsMatching(false);
-              setMatchProgress(null);
+              stopPolling();
               toast.success(`Matching complete: ${mig.matchedApps} matched, ${mig.partialMatchApps} partial`);
               await fetchMigration();
               await fetchApps();
@@ -253,9 +289,15 @@ export default function MigrationDetailPage({ params }: PageProps) {
                 isComplete: false,
               });
             }
+          } else {
+            consecutiveFailures++;
           }
         } catch {
-          // Silently continue polling
+          consecutiveFailures++;
+        }
+
+        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          stopPolling('Lost connection while checking matching progress. Refresh the page to check its current status.');
         }
       }, 2000);
     } catch (err) {
@@ -356,7 +398,7 @@ export default function MigrationDetailPage({ params }: PageProps) {
       if (!accessToken) throw new Error('Authentication required');
 
       const ids = Array.from(selectedApps);
-      await Promise.all(
+      const results = await Promise.all(
         ids.map(appId =>
           fetch('/api/sccm/match', {
             method: 'PATCH',
@@ -365,11 +407,21 @@ export default function MigrationDetailPage({ params }: PageProps) {
               Authorization: `Bearer ${accessToken}`,
             },
             body: JSON.stringify({ appId, action: 'exclude' }),
-          })
+          }).then(response => response.ok)
         )
       );
 
-      toast.success(`Excluded ${ids.length} apps`);
+      const failedCount = results.filter(ok => !ok).length;
+      const succeededCount = results.length - failedCount;
+
+      if (failedCount === 0) {
+        toast.success(`Excluded ${succeededCount} apps`);
+      } else if (succeededCount === 0) {
+        toast.error(`Failed to exclude ${failedCount} apps`);
+      } else {
+        toast.error(`Excluded ${succeededCount} apps, ${failedCount} failed`);
+      }
+
       setSelectedApps(new Set());
       await fetchApps();
       await fetchMigration();

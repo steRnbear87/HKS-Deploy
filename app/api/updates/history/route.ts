@@ -5,7 +5,9 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerClient, isSupabaseConfigured } from '@/lib/supabase';
+import { getDatabase } from '@/lib/db';
 import { parseAccessToken } from '@/lib/auth-utils';
+import { classifyUpdateType } from '@/types/update-policies';
 import type { AutoUpdateHistoryWithPolicy } from '@/types/update-policies';
 
 interface AutoUpdateHistoryRow {
@@ -51,10 +53,69 @@ export async function GET(request: NextRequest) {
     const offset = parseInt(searchParams.get('offset') || '0', 10);
 
     if (!isSupabaseConfigured()) {
+      // No app_update_policies/auto_update_history tables in SQLite mode, so
+      // history is derived from upload_history: each app's deployments are
+      // grouped by (winget_id, tenant), sorted oldest-first, and consecutive
+      // pairs become "update" entries (the first deployment in a group is an
+      // install, not an update, so it never appears as an entry itself - it
+      // only supplies the from_version for the next one).
+      const db = getDatabase();
+      const uploads = await db.uploadHistory.getByUserId(user.userId, 1000);
+
+      const groups = new Map<string, typeof uploads>();
+      for (const upload of uploads) {
+        const key = `${upload.winget_id}::${upload.intune_tenant_id || ''}`;
+        const group = groups.get(key);
+        if (group) {
+          group.push(upload);
+        } else {
+          groups.set(key, [upload]);
+        }
+      }
+
+      let entries: AutoUpdateHistoryWithPolicy[] = [];
+      for (const group of groups.values()) {
+        group.sort((a, b) => new Date(a.deployed_at).getTime() - new Date(b.deployed_at).getTime());
+        for (let i = 1; i < group.length; i++) {
+          const prev = group[i - 1];
+          const curr = group[i];
+          entries.push({
+            id: curr.id,
+            policy_id: '',
+            packaging_job_id: curr.packaging_job_id,
+            from_version: prev.version,
+            to_version: curr.version,
+            update_type: classifyUpdateType(prev.version, curr.version),
+            status: 'completed',
+            error_message: null,
+            triggered_at: curr.deployed_at,
+            completed_at: curr.deployed_at,
+            policy: {
+              winget_id: curr.winget_id,
+              tenant_id: curr.intune_tenant_id || '',
+            },
+            display_name: curr.display_name,
+          });
+        }
+      }
+
+      if (tenantId) {
+        entries = entries.filter((e) => e.policy.tenant_id === tenantId);
+      }
+      if (wingetId) {
+        entries = entries.filter((e) => e.policy.winget_id === wingetId);
+      }
+      if (status && status !== 'completed') {
+        entries = [];
+      }
+
+      entries.sort((a, b) => new Date(b.triggered_at).getTime() - new Date(a.triggered_at).getTime());
+      const page = entries.slice(offset, offset + limit);
+
       return NextResponse.json({
-        history: [],
-        count: 0,
-        hasMore: false,
+        history: page,
+        count: page.length,
+        hasMore: offset + limit < entries.length,
       });
     }
 

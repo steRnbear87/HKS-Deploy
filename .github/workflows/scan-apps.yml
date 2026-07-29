@@ -75,7 +75,11 @@ jobs:
             let query = supabase
               .from('curated_apps')
               .select('winget_id, name, publisher, latest_version, popularity_rank')
-              .not('latest_version', 'is', null);
+              .not('latest_version', 'is', null)
+              // Chocolatey packages aren't WinGet-manifest-based, so this
+              // winget install scan doesn't apply to them - same filter
+              // already applied to sync-manifests.yml/sync-chocolatey-catalog.yml.
+              .neq('app_source', 'chocolatey');
             if (specific) query = query.in('winget_id', requested);
             else query = query.order('popularity_rank', { ascending: true, nullsFirst: false }).limit(Math.max(500, maxApps * 20));
             const { data: candidates, error } = await query;

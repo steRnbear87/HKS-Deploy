@@ -103,6 +103,43 @@ export async function fetchWithRetry(
 }
 
 /**
+ * Fetch every page of a Graph list endpoint by following @odata.nextLink,
+ * using fetchWithRetry for each page. Reading only the first page silently
+ * truncates results once a tenant has more objects than fit on one page
+ * (Windows Update rings/profiles, their assignments, etc.) - callers that
+ * need the complete list, not just one caller-facing page, should use this
+ * instead of a single fetch().
+ */
+export async function fetchAllGraphPages<T>(
+  initialUrl: string,
+  token: string,
+  errorMessage: string
+): Promise<T[]> {
+  const results: T[] = [];
+  let nextUrl: string | undefined = initialUrl;
+
+  while (nextUrl) {
+    const response = await fetchWithRetry(
+      nextUrl,
+      { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } },
+      3
+    );
+
+    if (!response.ok) {
+      throw new Error(`${errorMessage}: ${response.status}`);
+    }
+
+    const data: { value?: T[]; '@odata.nextLink'?: string } = await response.json();
+    if (data.value) {
+      results.push(...data.value);
+    }
+    nextUrl = data['@odata.nextLink'];
+  }
+
+  return results;
+}
+
+/**
  * Get an access token for the service principal using the client-credentials
  * flow. Tokens are cached per tenant (with a 10-minute pre-expiry buffer) and
  * concurrent fetches for the same tenant are deduplicated.

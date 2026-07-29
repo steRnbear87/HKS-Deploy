@@ -37,6 +37,7 @@ import {
   invalidateServicePrincipalToken,
 } from '@/lib/intune/graph-client';
 import type { HardwareInformation } from '@/types/devices';
+import type { DeviceBiosInfoRecord } from '@/lib/db/types';
 
 // hardwareInformation (needed for BIOS) is beta-only - v1.0 returns 400
 // "Could not find a property named 'hardwareInformation'" - confirmed
@@ -100,11 +101,23 @@ async function fetchWindowsDeviceIds(tenantId: string, token: string, deadline: 
   return ids;
 }
 
+interface BiosCapturedFields {
+  biosVersion: string | null;
+  batteryHealthPercentage: number | null;
+  batteryChargeCycles: number | null;
+  totalStorageBytes: number | null;
+  freeStorageBytes: number | null;
+}
+
 type BiosFetchResult =
-  | { outcome: 'captured'; biosVersion: string | null }
+  | ({ outcome: 'captured' } & BiosCapturedFields)
   | { outcome: 'skip' } // 404 - device removed, will drop out of the id sweep naturally
   | { outcome: 'retry' }; // budget/retryable failure - leave for next invocation
 
+// Battery/storage fields ride along on the same per-device request already
+// made for BIOS version - totalStorageSpaceInBytes/freeStorageSpaceInBytes
+// are top-level managedDevice fields (not nested under hardwareInformation),
+// so both are added to the same $select rather than a second Graph call.
 async function fetchBiosVersion(
   deviceId: string,
   token: string,
@@ -115,7 +128,7 @@ async function fetchBiosVersion(
 
   try {
     const response = await fetchWithRetry(
-      `${GRAPH_API_BASE_BETA}/deviceManagement/managedDevices/${encodeURIComponent(deviceId)}?$select=hardwareInformation`,
+      `${GRAPH_API_BASE_BETA}/deviceManagement/managedDevices/${encodeURIComponent(deviceId)}?$select=hardwareInformation,totalStorageSpaceInBytes,freeStorageSpaceInBytes`,
       { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } },
       3,
       deadline
@@ -131,8 +144,20 @@ async function fetchBiosVersion(
       return { outcome: 'retry' };
     }
 
-    const data: { hardwareInformation?: HardwareInformation | null } = await response.json();
-    return { outcome: 'captured', biosVersion: data.hardwareInformation?.systemManagementBIOSVersion ?? null };
+    const data: {
+      hardwareInformation?: HardwareInformation | null;
+      totalStorageSpaceInBytes?: number | null;
+      freeStorageSpaceInBytes?: number | null;
+    } = await response.json();
+
+    return {
+      outcome: 'captured',
+      biosVersion: data.hardwareInformation?.systemManagementBIOSVersion ?? null,
+      batteryHealthPercentage: data.hardwareInformation?.batteryHealthPercentage ?? null,
+      batteryChargeCycles: data.hardwareInformation?.batteryChargeCycles ?? null,
+      totalStorageBytes: data.totalStorageSpaceInBytes ?? null,
+      freeStorageBytes: data.freeStorageSpaceInBytes ?? null,
+    };
   } catch (error) {
     const graphError = error as GraphFetchError;
     const budgetExhausted =
@@ -169,7 +194,7 @@ export async function captureBiosSnapshotForTenant(tenantId: string, budgetMs: n
   const remaining = currentDeviceIds.filter((id) => !capturedTodaySet.has(id));
   if (remaining.length === 0) return;
 
-  let buffer: Array<{ tenant_id: string; device_id: string; bios_version: string | null; captured_at: string }> = [];
+  let buffer: Array<Omit<DeviceBiosInfoRecord, 'id'>> = [];
   const flush = async () => {
     if (buffer.length === 0) return;
     await db.deviceBiosInfo.upsertMany(buffer);
@@ -186,7 +211,16 @@ export async function captureBiosSnapshotForTenant(tenantId: string, budgetMs: n
     chunk.forEach((deviceId, idx) => {
       const result = results[idx];
       if (result.outcome === 'captured') {
-        buffer.push({ tenant_id: tenantId, device_id: deviceId, bios_version: result.biosVersion, captured_at: now });
+        buffer.push({
+          tenant_id: tenantId,
+          device_id: deviceId,
+          bios_version: result.biosVersion,
+          battery_health_percentage: result.batteryHealthPercentage,
+          battery_charge_cycles: result.batteryChargeCycles,
+          total_storage_bytes: result.totalStorageBytes,
+          free_storage_bytes: result.freeStorageBytes,
+          captured_at: now,
+        });
       }
       // 'skip' and 'retry' write nothing - see BiosFetchResult doc above.
     });

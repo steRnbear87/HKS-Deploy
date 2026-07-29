@@ -195,6 +195,11 @@ permissions.
    }
    ```
 
+   Add `'User.Read.All'` to that role list too if you want the Devices page's
+   "Office location" column populated (it reads each primary user's Entra ID
+   profile) - it's optional, and the app degrades gracefully (the column just
+   stays empty) without it.
+
 3. **Configure IntuneGet:** set `AZURE_AUTH_MODE=managed-identity` and leave
    `AZURE_AD_CLIENT_SECRET` empty. For a user-assigned identity also set
    `AZURE_MANAGED_IDENTITY_CLIENT_ID`. The same variables apply to the local

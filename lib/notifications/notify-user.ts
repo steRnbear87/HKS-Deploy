@@ -187,34 +187,46 @@ export async function notifyUserOfPendingUpdates(
       }
     }
 
-    // Send webhooks
-    for (const webhook of userWebhooks) {
-      const webhookResult = await deliverWebhook(webhook, payload);
+    // Send webhooks concurrently rather than one at a time - this function
+    // is also called synchronously from the on-demand /api/updates/refresh
+    // route, so a slow/unreachable webhook (each with its own retries and
+    // timeout inside deliverWebhook) previously added its full delivery time
+    // to every other webhook's, turning a handful of configured webhooks
+    // into minutes of blocked request time for that user.
+    const webhookOutcomes = await Promise.all(
+      userWebhooks.map(async (webhook) => {
+        const webhookResult = await deliverWebhook(webhook, payload);
 
-      const statusUpdate: Record<string, unknown> = {
-        updated_at: new Date().toISOString(),
-      };
-      if (webhookResult.success) {
-        statusUpdate.last_success_at = new Date().toISOString();
-        statusUpdate.failure_count = 0;
-      } else {
-        statusUpdate.last_failure_at = new Date().toISOString();
-        statusUpdate.failure_count = (webhook.failure_count || 0) + 1;
-      }
+        const statusUpdate: Record<string, unknown> = {
+          updated_at: new Date().toISOString(),
+        };
+        if (webhookResult.success) {
+          statusUpdate.last_success_at = new Date().toISOString();
+          statusUpdate.failure_count = 0;
+        } else {
+          statusUpdate.last_failure_at = new Date().toISOString();
+          statusUpdate.failure_count = (webhook.failure_count || 0) + 1;
+        }
 
-      await supabase.from('webhook_configurations').update(statusUpdate).eq('id', webhook.id);
+        await Promise.all([
+          supabase.from('webhook_configurations').update(statusUpdate).eq('id', webhook.id),
+          supabase.from('notification_history').insert({
+            user_id: userId,
+            channel: 'webhook',
+            webhook_id: webhook.id,
+            payload,
+            status: webhookResult.success ? 'sent' : 'failed',
+            error_message: webhookResult.error || null,
+            apps_notified: appUpdates.length,
+            sent_at: webhookResult.success ? new Date().toISOString() : null,
+          }),
+        ]);
 
-      await supabase.from('notification_history').insert({
-        user_id: userId,
-        channel: 'webhook',
-        webhook_id: webhook.id,
-        payload,
-        status: webhookResult.success ? 'sent' : 'failed',
-        error_message: webhookResult.error || null,
-        apps_notified: appUpdates.length,
-        sent_at: webhookResult.success ? new Date().toISOString() : null,
-      });
+        return { webhook, webhookResult };
+      })
+    );
 
+    for (const { webhook, webhookResult } of webhookOutcomes) {
       if (webhookResult.success) {
         delivered = true;
         result.webhooksSent++;

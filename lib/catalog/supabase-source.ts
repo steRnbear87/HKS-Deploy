@@ -14,7 +14,19 @@
 
 import { createClient } from '@supabase/supabase-js';
 import { createServerClient } from '@/lib/supabase';
-import { getLocaleDisplay } from '@/lib/locale-utils';
+
+/**
+ * Quote a value for use inside a PostgREST `.or()` filter string. Without
+ * this, a value containing a comma or parenthesis (e.g. an SCCM inventory
+ * name like "Microsoft Visual C++ 2015-2022 Redistributable (x64)") breaks
+ * the or() grammar - PostgREST then rejects or misparses the whole filter,
+ * which callers here treat as "no match" rather than a hard error, so the
+ * failure was previously silent.
+ */
+function quotePostgrestOrValue(value: string): string {
+  return `"${value.replace(/"/g, '')}"`;
+}
+import { getLocaleDisplay, countryCodeToFlag } from '@/lib/locale-utils';
 import type { LocaleVariant } from '@/types/winget';
 import type { CuratedAppMatch } from '@/lib/app-mappings';
 import type { InstallationSnapshot } from '@/lib/winget-api';
@@ -51,6 +63,37 @@ const LICENSE_BUCKET_ILIKE_PATTERNS: Record<LicenseBucket, string[]> = {
 /** Builds a Supabase `.or()` filter string matching any pattern in `patterns` against `column`. */
 function orIlike(column: string, patterns: string[]): string {
   return patterns.map((p) => `${column}.ilike.${p}`).join(',');
+}
+
+const ALL_KNOWN_LICENSE_PATTERNS = [
+  ...LICENSE_BUCKET_ILIKE_PATTERNS['open-source'],
+  ...LICENSE_BUCKET_ILIKE_PATTERNS.freeware,
+  ...LICENSE_BUCKET_ILIKE_PATTERNS.proprietary,
+];
+
+/**
+ * Builds a PostgREST `.or()` filter string for the selected license
+ * buckets. Every bucket but "unknown" is a simple OR of its ILIKE keyword
+ * patterns. "unknown" has no positive pattern of its own (it's defined as
+ * "matches none of the others"), so selecting it previously added zero
+ * patterns to the filter and the whole license-bucket filter silently
+ * became a no-op (every row passed). Expressed here instead as "license is
+ * null OR license doesn't match any known-bucket pattern".
+ */
+function buildLicenseBucketFilter(buckets: LicenseBucket[]): string | null {
+  const groups: string[] = [];
+  for (const bucket of buckets) {
+    if (bucket === 'unknown') {
+      const notConditions = ALL_KNOWN_LICENSE_PATTERNS.map((p) => `license.not.ilike.${p}`).join(',');
+      groups.push(`or(license.is.null,and(${notConditions}))`);
+    } else {
+      const patterns = LICENSE_BUCKET_ILIKE_PATTERNS[bucket];
+      if (patterns.length > 0) {
+        groups.push(`or(${orIlike('license', patterns)})`);
+      }
+    }
+  }
+  return groups.length > 0 ? groups.join(',') : null;
 }
 
 /**
@@ -147,9 +190,9 @@ function applyCatalogFilters<
   }
 
   if (f.licenseBuckets && f.licenseBuckets.length > 0) {
-    const patterns = f.licenseBuckets.flatMap((b) => LICENSE_BUCKET_ILIKE_PATTERNS[b]);
-    if (patterns.length > 0) {
-      q = q.or(orIlike('license', patterns));
+    const filterString = buildLicenseBucketFilter(f.licenseBuckets);
+    if (filterString) {
+      q = q.or(filterString);
     }
   }
 
@@ -193,17 +236,33 @@ export class SupabaseCatalogSource implements CatalogSource {
       return { data: null, error: { message: 'Supabase configuration missing' } };
     }
 
-    // search_curated_apps is a Postgres stored function; it only accepts
-    // category_filter today. The new facets (publisher/tag/license/etc.) are
-    // not yet applied to Supabase-mode search results - only to browse
-    // (getPopularApps) below - since wiring them in would mean modifying a
-    // function on the shared hosted database.
+    // Same "unknown" no-positive-pattern gap as applyCatalogFilters below,
+    // but not fixed here: the search_curated_apps RPC's license_ilike_patterns
+    // param is a simple ILIKE-ANY positive match, with no equivalent of
+    // buildLicenseBucketFilter's null-or-negated-patterns expression - doing
+    // that here would mean another migration to the RPC's SQL. Search
+    // results with "Unknown" selected remain effectively unfiltered on
+    // license, same as before.
+    const licensePatterns = opts.filters?.licenseBuckets?.length
+      ? opts.filters.licenseBuckets.flatMap((b) => LICENSE_BUCKET_ILIKE_PATTERNS[b])
+      : null;
+
     const { data: curatedData, error: curatedError } = await supabase.rpc(
       'search_curated_apps',
       {
         search_query: query,
         category_filter: opts.category || opts.filters?.categories?.[0] || null,
         result_limit: opts.limit,
+        publisher_filter: opts.filters?.publisher || null,
+        tag_filter: opts.filters?.tag || null,
+        app_source_filter: opts.filters?.appSources?.length ? opts.filters.appSources : null,
+        license_ilike_patterns: licensePatterns?.length ? licensePatterns : null,
+        // Full multi-select list - category_filter above only ever carries
+        // the first selection (kept for older-caller/RPC-signature
+        // backward compatibility). See the multi-category migration for
+        // why this pair of params exists instead of just widening
+        // category_filter to an array.
+        category_filters: opts.filters?.categories?.length ? opts.filters.categories : null,
       }
     );
 
@@ -256,23 +315,58 @@ export class SupabaseCatalogSource implements CatalogSource {
       return q;
     };
 
-    // NOTE: when installerTypes is set, this count is an upper bound - it
-    // matches on winget_id membership only, not the exact (winget_id,
-    // latest_version) pairing the data query narrows to below, since Supabase
-    // JS can't express that two-column join in a single count() call.
-    const { count: totalCount, error: countError } = await buildBaseQuery('*', {
-      count: 'exact',
-      head: true,
-    });
-
-    if (countError) {
-      console.error('Failed to count curated packages', { error: countError, filters });
-      return null;
+    let totalCount: number;
+    // When an installerTypes filter is active, candidateWingetIds only
+    // narrows by winget_id membership (any historical version matched) -
+    // exactMatchWingetIds narrows further to just the ids whose CURRENT
+    // latest_version actually matches, computed once and reused for both
+    // the count and the data query below. Previously this exact-match
+    // filter was applied to the data query's rows *after* .range() had
+    // already sliced the broader (any-version-match) candidate set, so a
+    // page could come back with fewer than `limit` rows even though more
+    // exact matches existed further into the candidate set - infinite
+    // scroll then advanced its offset by the (already-short) returned
+    // count, permanently skipping/duplicating results for the rest of the
+    // scroll. Filtering to the exact set BEFORE pagination closes that.
+    let exactMatchWingetIds: string[] | null = null;
+    if (matchingWingetIds) {
+      const { data: countRows, error: countError } = await buildBaseQuery(
+        'winget_id, latest_version'
+      );
+      if (countError) {
+        console.error('Failed to count curated packages', { error: countError, filters });
+        return null;
+      }
+      const ids = matchingWingetIds;
+      exactMatchWingetIds = Array.from(
+        new Set(
+          ((countRows || []) as unknown as Array<{ winget_id: string; latest_version: string }>)
+            .filter((r) => ids.has(`${r.winget_id}::${r.latest_version}`))
+            .map((r) => r.winget_id)
+        )
+      );
+      totalCount = exactMatchWingetIds.length;
+      if (exactMatchWingetIds.length === 0) {
+        return { data: [], total: 0 };
+      }
+    } else {
+      const { count, error: countError } = await buildBaseQuery('*', {
+        count: 'exact',
+        head: true,
+      });
+      if (countError) {
+        console.error('Failed to count curated packages', { error: countError, filters });
+        return null;
+      }
+      totalCount = count || 0;
     }
 
     let dataQuery = buildBaseQuery(
       'id, winget_id, name, publisher, latest_version, description, homepage, category, tags, icon_path, popularity_rank, app_source, store_package_id, license, winget_last_update'
     );
+    if (exactMatchWingetIds) {
+      dataQuery = dataQuery.in('winget_id', exactMatchWingetIds);
+    }
 
     switch (sort) {
       case 'name':
@@ -296,16 +390,9 @@ export class SupabaseCatalogSource implements CatalogSource {
       return null;
     }
 
-    let rows = (data || []) as unknown as Array<
+    const rows = (data || []) as unknown as Array<
       PopularPackagesResult['data'][number] & { license?: string | null }
     >;
-    // Narrow to rows whose CURRENT latest_version matches (the winget_id
-    // pre-filter above can include apps where an older version had this
-    // installer type but the latest one doesn't).
-    if (matchingWingetIds) {
-      const ids = matchingWingetIds;
-      rows = rows.filter((r) => ids.has(`${r.winget_id}::${r.latest_version}`));
-    }
 
     return {
       data: rows.map((r) => ({ ...r, license_bucket: classifyLicenseForDisplay(r.license) })),
@@ -453,6 +540,34 @@ export class SupabaseCatalogSource implements CatalogSource {
       versions,
       localeVariants,
     };
+  }
+
+  async getLocaleVariants(parentWingetId: string): Promise<LocaleVariant[]> {
+    const supabase = serviceOrAnonClient();
+    if (!supabase) {
+      return [];
+    }
+
+    const { data: variantData, error } = await supabase.rpc('get_locale_variants', {
+      parent_id: parentWingetId,
+    });
+    if (error || !variantData || variantData.length === 0) {
+      return [];
+    }
+
+    return variantData.map(
+      (v: { winget_id: string; locale_code: string; latest_version: string | null }) => {
+        const display = getLocaleDisplay(v.locale_code);
+        return {
+          wingetId: v.winget_id,
+          localeCode: v.locale_code,
+          localeName: display.name,
+          countryFlag: display.flag,
+          flagEmoji: countryCodeToFlag(display.flag),
+          version: v.latest_version || undefined,
+        };
+      }
+    );
   }
 
   async getVersions(wingetId: string): Promise<string[]> {
@@ -661,6 +776,7 @@ export class SupabaseCatalogSource implements CatalogSource {
 
     const normalizedSearch = term.toLowerCase().trim();
     const supabase = createServerClient();
+    const pattern = quotePostgrestOrValue(`%${normalizedSearch}%`);
 
     try {
       const { data, error } = await supabase
@@ -668,7 +784,7 @@ export class SupabaseCatalogSource implements CatalogSource {
         .select('winget_id, name, publisher, latest_version')
         .not('latest_version', 'is', null)
         .or(
-          `name.ilike.%${normalizedSearch}%,publisher.ilike.%${normalizedSearch}%,winget_id.ilike.%${normalizedSearch}%`
+          `name.ilike.${pattern},publisher.ilike.${pattern},winget_id.ilike.${pattern}`
         )
         .order('popularity_rank', { ascending: true, nullsFirst: false })
         .limit(10);
@@ -809,10 +925,16 @@ export class SupabaseCatalogSource implements CatalogSource {
   ): Promise<{ winget_id: string } | null> {
     const supabase = createServerClient();
 
+    // ILIKE treats `%`/`_` in the pattern as wildcards - without escaping
+    // them, a winget_id containing a literal underscore (a normal, common
+    // character in real WinGet IDs) would match any other ID that merely
+    // has some other character in that position, risking a false
+    // "already exists" response.
+    const escapedWingetId = wingetId.replace(/[\\%_]/g, '\\$&');
     const { data } = await supabase
       .from('curated_apps')
       .select('id, winget_id')
-      .ilike('winget_id', wingetId)
+      .ilike('winget_id', escapedWingetId)
       .limit(1)
       .maybeSingle();
 
@@ -825,10 +947,11 @@ export class SupabaseCatalogSource implements CatalogSource {
   ): Promise<{ winget_id: string; name: string }[]> {
     const supabase = createServerClient();
 
+    const pattern = quotePostgrestOrValue(`%${term}%`);
     const { data } = await supabase
       .from('curated_apps')
       .select('winget_id, name')
-      .or(`winget_id.ilike.%${term}%,name.ilike.%${term}%`)
+      .or(`winget_id.ilike.${pattern},name.ilike.${pattern}`)
       .eq('is_verified', true)
       .limit(limit);
 

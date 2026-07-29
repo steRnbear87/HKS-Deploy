@@ -11,6 +11,7 @@
 import { NextResponse } from 'next/server';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { parseVersion } from '@/lib/version-compare';
+import { verifyCronSecret } from '@/lib/cron-auth';
 import {
   AutoUpdateTrigger,
   getLatestInstallerInfo,
@@ -772,9 +773,7 @@ async function runSupabaseModeCron(supabaseUrl: string, supabaseServiceKey: stri
 }
 
 export async function GET(request: Request) {
-  // Verify cron secret
-  const authHeader = request.headers.get('authorization');
-  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+  if (!verifyCronSecret(request)) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 

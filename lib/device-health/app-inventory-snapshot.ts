@@ -11,7 +11,7 @@
  */
 
 import { getDatabase } from '@/lib/db';
-import { getServicePrincipalToken } from '@/lib/intune/graph-client';
+import { fetchWithRetry, getServicePrincipalToken, invalidateServicePrincipalToken } from '@/lib/intune/graph-client';
 import { normalizeAppKey } from '@/lib/intune/device-health';
 
 // detectedApps requires beta - same as the per-device detected-apps route.
@@ -58,11 +58,15 @@ export async function captureAppInventorySnapshot(tenantId: string): Promise<voi
         break;
       }
 
-      const response = await fetch(nextUrl, {
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      });
+      const response = await fetchWithRetry(
+        nextUrl,
+        { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } },
+        3,
+        scanDeadline
+      );
 
       if (!response.ok) {
+        if (response.status === 401) invalidateServicePrincipalToken(tenantId);
         const bodyText = await response.text().catch(() => '');
         console.error(`[app-inventory] Graph detectedApps ${response.status} for tenant ${tenantId}:`, bodyText);
         return;

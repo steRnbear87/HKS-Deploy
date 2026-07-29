@@ -4,3 +4,8 @@ export { TopAppsChart } from './TopAppsChart';
 export { RecentFailuresTable } from './RecentFailuresTable';
 export { DateRangePicker } from './DateRangePicker';
 export { InstallStatusPanel } from './InstallStatusPanel';
+export { AutopilotFunnelChart } from './AutopilotFunnelChart';
+export { AutopilotGroupTagChart } from './AutopilotGroupTagChart';
+export { AutopilotFailureReasonsList } from './AutopilotFailureReasonsList';
+export { ReportCatalog } from './ReportCatalog';
+export { ReportRunner } from './ReportRunner';

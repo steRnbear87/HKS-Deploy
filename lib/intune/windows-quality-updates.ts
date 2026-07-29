@@ -9,7 +9,7 @@
  * Autopatch (lib/intune/windows-autopatch.ts) when the tenant has it enabled.
  */
 
-import { fetchWithRetry } from './graph-client';
+import { fetchWithRetry, fetchAllGraphPages } from './graph-client';
 import type { QualityUpdateProfile } from '@/types/windows-updates';
 import type { AssignmentTarget } from '@/types/intune';
 
@@ -38,16 +38,12 @@ function toQualityUpdateProfile(raw: Record<string, unknown>): QualityUpdateProf
 }
 
 export async function listQualityUpdateProfiles(token: string): Promise<QualityUpdateProfile[]> {
-  const response = await fetchWithRetry(`${GRAPH_API_BASE_BETA}/${RESOURCE}`, {
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-  }, 3);
-
-  if (!response.ok) {
-    throw new Error(`Failed to list quality update profiles: ${response.status}`);
-  }
-
-  const data: { value?: Array<Record<string, unknown>> } = await response.json();
-  return (data.value || []).map(toQualityUpdateProfile);
+  const rows = await fetchAllGraphPages<Record<string, unknown>>(
+    `${GRAPH_API_BASE_BETA}/${RESOURCE}`,
+    token,
+    'Failed to list quality update profiles'
+  );
+  return rows.map(toQualityUpdateProfile);
 }
 
 export async function getQualityUpdateProfile(token: string, profileId: string): Promise<QualityUpdateProfile> {
@@ -132,14 +128,10 @@ export async function listQualityUpdateProfileAssignments(
   token: string,
   profileId: string
 ): Promise<AssignmentTarget[]> {
-  const response = await fetchWithRetry(`${GRAPH_API_BASE_BETA}/${RESOURCE}/${profileId}/assignments`, {
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-  }, 3);
-
-  if (!response.ok) {
-    throw new Error(`Failed to list assignments for quality update profile ${profileId}: ${response.status}`);
-  }
-
-  const data: { value?: Array<{ target: AssignmentTarget }> } = await response.json();
-  return (data.value || []).map((a) => a.target);
+  const rows = await fetchAllGraphPages<{ target: AssignmentTarget }>(
+    `${GRAPH_API_BASE_BETA}/${RESOURCE}/${profileId}/assignments`,
+    token,
+    `Failed to list assignments for quality update profile ${profileId}`
+  );
+  return rows.map((a) => a.target);
 }

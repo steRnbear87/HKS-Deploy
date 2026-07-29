@@ -5,6 +5,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerClient, isSupabaseConfigured } from '@/lib/supabase';
+import { getDatabase } from '@/lib/db';
 import { getCatalogSource } from '@/lib/catalog';
 import { parseAccessToken } from '@/lib/auth-utils';
 import {
@@ -73,24 +74,233 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const response: TriggerUpdateResponse = {
+      success: true,
+      triggered: 0,
+      failed: 0,
+      results: [],
+    };
+
+    // Self-hosted SQLite mode has no app_update_policies/auto_update_history/
+    // tenant_consent tables to back the full policy-driven flow below, so it
+    // gets a simplified path: build the deployment config straight from the
+    // catalog/prior deployment and create the packaging job directly, with
+    // no policy tracking, rate limiting, or history bookkeeping.
     if (!isSupabaseConfigured()) {
-      const unavailableError =
-        'Update deployment requires Supabase and is not available on this self-hosted deployment';
-      return NextResponse.json(
-        {
-          success: false,
-          triggered: 0,
-          failed: updateRequests.length,
-          results: updateRequests.map((req) => ({
+      for (const req of updateRequests) {
+        try {
+          if (isSelfUpdatingApp(req.winget_id)) {
+            response.failed++;
+            response.results.push({
+              winget_id: req.winget_id,
+              tenant_id: req.tenant_id,
+              success: false,
+              error: `${req.winget_id} keeps itself up to date on the device (Click-to-Run); IntuneGet does not deploy updates for it. Refresh the updates list to remove it.`,
+            });
+            continue;
+          }
+
+          const db = getDatabase();
+          const updates = await db.updateCheckResults.getByUserId(user.userId, {
+            tenantId: req.tenant_id,
+          });
+          const updateResult = updates.find((u) => u.winget_id === req.winget_id);
+
+          if (!updateResult) {
+            response.failed++;
+            response.results.push({
+              winget_id: req.winget_id,
+              tenant_id: req.tenant_id,
+              success: false,
+              error: 'Update not found',
+            });
+            continue;
+          }
+
+          const built = await buildDeploymentConfigForApp(null, {
+            userId: user.userId,
+            tenantId: req.tenant_id,
+            wingetId: req.winget_id,
+            latestVersion: updateResult.latest_version,
+            // No user_settings table in SQLite mode; assignment carryover
+            // always defaults off for self-hosted manual triggers.
+            globalCarryOver: false,
+          });
+
+          if (built.status === 'orphaned_job') {
+            response.failed++;
+            response.results.push({
+              winget_id: req.winget_id,
+              tenant_id: req.tenant_id,
+              success: false,
+              error: 'Could not retrieve deployment configuration',
+            });
+            continue;
+          }
+
+          if (built.status === 'unavailable') {
+            const catalogRow = await getCatalogSource().appExists(req.winget_id);
+            response.failed++;
+            response.results.push({
+              winget_id: req.winget_id,
+              tenant_id: req.tenant_id,
+              success: false,
+              error: catalogRow
+                ? `No installer data is available for ${req.winget_id} ${updateResult.latest_version} yet - the catalog has not synced this version's manifest. Try again after the next catalog sync.`
+                : `${req.winget_id} is not in the app catalog, so a deployment configuration cannot be built for it.`,
+            });
+            continue;
+          }
+
+          const { deploymentConfig, currentIntuneAppId } = built;
+
+          const installerInfo = await getLatestInstallerInfo(null, req.winget_id);
+          if (!installerInfo) {
+            response.failed++;
+            response.results.push({
+              winget_id: req.winget_id,
+              tenant_id: req.tenant_id,
+              success: false,
+              error: 'Could not get installer information for latest version',
+            });
+            continue;
+          }
+          installerInfo.currentVersion = updateResult.current_version;
+          installerInfo.currentIntuneAppId =
+            currentIntuneAppId || updateResult.intune_app_id || undefined;
+
+          const sourceIntuneAppId = installerInfo.currentIntuneAppId || null;
+          const jobId = crypto.randomUUID();
+
+          await db.jobs.create({
+            id: jobId,
+            user_id: user.userId,
+            user_email: user.userEmail,
+            tenant_id: req.tenant_id,
+            winget_id: req.winget_id,
+            version: installerInfo.latestVersion,
+            display_name: deploymentConfig.displayName || installerInfo.displayName,
+            publisher: deploymentConfig.publisher,
+            architecture: deploymentConfig.architecture,
+            installer_type: installerInfo.installerType || deploymentConfig.installerType,
+            installer_url: installerInfo.installerUrl,
+            installer_sha256: installerInfo.installerSha256,
+            install_command: deploymentConfig.installCommand,
+            uninstall_command: deploymentConfig.uninstallCommand,
+            install_scope: deploymentConfig.installScope,
+            detection_rules: deploymentConfig.detectionRules as unknown as Json,
+            package_config: {
+              assignments: deploymentConfig.assignments,
+              categories: deploymentConfig.categories,
+              requirementRules: deploymentConfig.requirementRules,
+              relationships: deploymentConfig.relationships,
+              psadtConfig: deploymentConfig.psadtConfig,
+              nestedInstallerType: installerInfo.nestedInstallerType,
+              nestedInstallerPath: installerInfo.nestedInstallerPath,
+              forceCreate: deploymentConfig.forceCreateNewApp !== false,
+              sourceIntuneAppId,
+              // Self-hosted SQLite mode has no per-user carry-over preference to
+              // read (no user_settings table), and no multi-tenant policy reason
+              // not to clean up - always retire the previous app's assignment so
+              // updates don't accumulate orphaned Win32 app objects in Intune.
+              assignmentMigration: deploymentConfig.assignmentMigration || {
+                carryOverAssignments: true,
+                removeAssignmentsFromPreviousApp: true,
+              },
+              description: deploymentConfig.description,
+              notes: deploymentConfig.notes,
+            } as unknown as Json,
+            status: 'queued',
+            progress_percent: 0,
+          });
+
+          const features = getFeatureFlags();
+          const isLocalPackagerMode = features.localPackager;
+
+          if (!isLocalPackagerMode && isGitHubActionsConfigured()) {
+            const appConfig = getAppConfig();
+            const baseUrl = appConfig.app.url || (process.env.VERCEL_URL
+              ? `https://${process.env.VERCEL_URL}`
+              : 'http://localhost:3000');
+            const callbackUrl = `${baseUrl}/api/package/callback`;
+
+            const workflowInputs: WorkflowInputs = {
+              jobId,
+              tenantId: req.tenant_id,
+              wingetId: req.winget_id,
+              displayName: deploymentConfig.displayName || installerInfo.displayName,
+              description: buildIntuneAppDescription({
+                description: deploymentConfig.description,
+                fallback: `Deployed via HKS App Deployment from Winget: ${req.winget_id}`,
+              }),
+              publisher: deploymentConfig.publisher || 'Unknown Publisher',
+              version: installerInfo.latestVersion,
+              architecture: deploymentConfig.architecture || 'x64',
+              installerUrl: installerInfo.installerUrl,
+              installerSha256: installerInfo.installerSha256 || '',
+              installerType: installerInfo.installerType || deploymentConfig.installerType || 'exe',
+              nestedInstallerType: installerInfo.nestedInstallerType,
+              nestedInstallerPath: installerInfo.nestedInstallerPath,
+              silentSwitches: extractSilentSwitches(
+                deploymentConfig.installCommand || '',
+                installerInfo.installerType || deploymentConfig.installerType || 'exe'
+              ),
+              uninstallCommand: deploymentConfig.uninstallCommand || '',
+              callbackUrl,
+              detectionRules: deploymentConfig.detectionRules
+                ? JSON.stringify(deploymentConfig.detectionRules)
+                : undefined,
+              psadtConfig: deploymentConfig.psadtConfig
+                ? JSON.stringify(deploymentConfig.psadtConfig)
+                : undefined,
+              assignments: deploymentConfig.assignments
+                ? JSON.stringify(deploymentConfig.assignments)
+                : undefined,
+              categories: deploymentConfig.categories
+                ? JSON.stringify(deploymentConfig.categories)
+                : undefined,
+              requirementRules: deploymentConfig.requirementRules
+                ? JSON.stringify(deploymentConfig.requirementRules)
+                : undefined,
+              relationships: deploymentConfig.relationships && deploymentConfig.relationships.length > 0
+                ? JSON.stringify(deploymentConfig.relationships)
+                : undefined,
+              installScope: (deploymentConfig.installScope === 'user' ? 'user' : 'machine') as 'machine' | 'user',
+              forceCreate: deploymentConfig.forceCreateNewApp !== false,
+              sourceIntuneAppId: sourceIntuneAppId || undefined,
+              carryOverAssignments: true,
+              removeAssignmentsFromPreviousApp: true,
+              autoSupersede: true,
+              supersedenceType: 'update',
+            };
+
+            const isBatch = updateRequests.length > 1;
+            await triggerPackagingWorkflow(workflowInputs, undefined, {
+              skipRunCapture: isBatch,
+            });
+          }
+          // If local packager mode, the job stays in 'queued'/'packaging' for local pickup
+
+          response.triggered++;
+          response.results.push({
+            winget_id: req.winget_id,
+            tenant_id: req.tenant_id,
+            success: true,
+            packaging_job_id: jobId,
+          });
+        } catch (error) {
+          response.failed++;
+          response.results.push({
             winget_id: req.winget_id,
             tenant_id: req.tenant_id,
             success: false,
-            error: unavailableError,
-          })),
-          error: unavailableError,
-        },
-        { status: 503 }
-      );
+            error: error instanceof Error ? error.message : 'Unknown error',
+          });
+        }
+      }
+
+      response.success = response.failed === 0;
+      return NextResponse.json(response);
     }
 
     const supabase = createServerClient();
@@ -107,13 +317,6 @@ export async function POST(request: NextRequest) {
     }
 
     const autoUpdateTrigger = new AutoUpdateTrigger(supabaseUrl, supabaseServiceKey);
-
-    const response: TriggerUpdateResponse = {
-      success: true,
-      triggered: 0,
-      failed: 0,
-      results: [],
-    };
 
     // Read the user's global update settings once for the whole batch - they
     // do not change mid-request and per-item reads add up across 10 apps
@@ -132,12 +335,6 @@ export async function POST(request: NextRequest) {
     const supersedePrevious = Boolean(userSettings?.supersedePreviousApp);
 
     for (const req of updateRequests) {
-      let restorePolicyState: {
-        id: string;
-        policy_type: AppUpdatePolicy['policy_type'];
-        is_enabled: boolean;
-      } | null = null;
-
       try {
         // Self-updating apps are excluded from update detection; guard here
         // too in case a stale check result from before the exclusion remains
@@ -250,26 +447,6 @@ export async function POST(request: NextRequest) {
           policy = newPolicy;
         }
 
-        // Temporarily enable auto-update for manual trigger.
-        // We always restore this in finally if we changed it.
-        const shouldTemporarilyEnable =
-          policy.policy_type !== 'auto_update' || !policy.is_enabled;
-        if (shouldTemporarilyEnable) {
-          restorePolicyState = {
-            id: policy.id,
-            policy_type: policy.policy_type,
-            is_enabled: policy.is_enabled,
-          };
-
-          await supabase
-            .from('app_update_policies')
-            .update({ policy_type: 'auto_update', is_enabled: true })
-            .eq('id', policy.id);
-
-          policy.policy_type = 'auto_update';
-          policy.is_enabled = true;
-        }
-
         // Get installer info
         const installerInfo = await getLatestInstallerInfo(supabase, req.winget_id);
 
@@ -306,7 +483,13 @@ export async function POST(request: NextRequest) {
         const triggerResult = await autoUpdateTrigger.triggerAutoUpdate(
           policy as AppUpdatePolicy,
           installerInfo,
-          { skipRateLimits: true, skipPriorDeploymentCheck: true }
+          // skipPolicyGateCheck: the user explicitly clicked "Update Now" for
+          // this app, which may have policy_type 'ignore'/'pin_version' or be
+          // disabled - bypass the gate for this one call without ever
+          // writing 'auto_update'/enabled to the DB row (a stored flip was
+          // visible to the cron's own eligibility query and could trigger a
+          // second, independent update for an app the user excluded).
+          { skipRateLimits: true, skipPriorDeploymentCheck: true, skipPolicyGateCheck: true }
         );
 
         if (triggerResult.success && triggerResult.packagingJobId) {
@@ -410,23 +593,6 @@ export async function POST(request: NextRequest) {
           success: false,
           error: error instanceof Error ? error.message : 'Unknown error',
         });
-      } finally {
-        if (restorePolicyState) {
-          const { error: restoreError } = await supabase
-            .from('app_update_policies')
-            .update({
-              policy_type: restorePolicyState.policy_type,
-              is_enabled: restorePolicyState.is_enabled,
-            })
-            .eq('id', restorePolicyState.id);
-
-          if (restoreError) {
-            console.error(
-              `Failed to restore update policy ${restorePolicyState.id}:`,
-              restoreError.message
-            );
-          }
-        }
       }
     }
 

@@ -3,10 +3,18 @@
  * Returns the appropriate database adapter based on configuration
  */
 
+import crypto from 'crypto';
 import type { DatabaseAdapter } from './types';
 
 // Re-export types
 export type { DatabaseAdapter, PackagingJob, UploadHistoryRecord, JobStats } from './types';
+
+/** Constant-time string comparison, so a mismatching secret takes the same time regardless of where the difference is. */
+function timingSafeStringEqual(a: string, b: string): boolean {
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  return bufA.length === bufB.length && crypto.timingSafeEqual(bufA, bufB);
+}
 
 // Singleton database instance
 let databaseInstance: DatabaseAdapter | null = null;
@@ -82,12 +90,15 @@ export function verifyPackagerApiKey(providedKey: string | null): boolean {
       console.warn('[Auth] PACKAGER_API_KEY is not set - packager authentication will fail');
       return false;
     }
-    return providedKey === apiKey;
+    return timingSafeStringEqual(providedKey, apiKey);
   }
 
   // In Supabase mode, use the service role key (existing behavior)
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  return providedKey === serviceRoleKey;
+  if (!serviceRoleKey) {
+    return false;
+  }
+  return timingSafeStringEqual(providedKey, serviceRoleKey);
 }
 
 /**

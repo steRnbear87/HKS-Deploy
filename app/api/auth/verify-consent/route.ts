@@ -41,6 +41,12 @@ interface PermissionStatus {
   // needs the write-capable role. Checked via role claim only, not a live
   // Graph call, since testing "can write" would require an actual mutation.
   deviceManagementConfigurationWrite: boolean | null;
+  // Distinct from deviceManagementServiceConfig (.ReadWrite.All, used by ESP
+  // profiles): Autopilot reporting only needs the read-only role. Graph app
+  // roles aren't hierarchical - having ReadWrite.All granted does not itself
+  // populate Read.All in the token's roles claim - so this needs its own
+  // check, same as deviceManagementConfiguration/-Write above.
+  deviceManagementServiceConfigRead: boolean | null;
 }
 
 interface ConsentVerificationResult {
@@ -113,6 +119,7 @@ async function verifyConsentWithGraph(tenantId: string, justConsented = false): 
         deviceManagementServiceConfig: tokenRoles.includes('DeviceManagementServiceConfig.ReadWrite.All'),
         deviceManagementConfiguration: tokenRoles.includes('DeviceManagementConfiguration.Read.All'),
         deviceManagementConfigurationWrite: tokenRoles.includes('DeviceManagementConfiguration.ReadWrite.All'),
+        deviceManagementServiceConfigRead: tokenRoles.includes('DeviceManagementServiceConfig.Read.All'),
       };
 
       // If consent was just granted, Microsoft can take minutes to propagate
@@ -148,6 +155,7 @@ async function verifyConsentWithGraph(tenantId: string, justConsented = false): 
     deviceManagementServiceConfig: tokenRoles.includes('DeviceManagementServiceConfig.ReadWrite.All') || null,
     deviceManagementConfiguration: tokenRoles.includes('DeviceManagementConfiguration.Read.All') || null,
     deviceManagementConfigurationWrite: tokenRoles.includes('DeviceManagementConfiguration.ReadWrite.All') || null,
+    deviceManagementServiceConfigRead: tokenRoles.includes('DeviceManagementServiceConfig.Read.All') || null,
   };
 
   // Test DeviceManagementApps.ReadWrite.All permission
@@ -280,6 +288,40 @@ async function verifyConsentWithGraph(tenantId: string, justConsented = false): 
     );
   } catch {
     permissions.deviceManagementConfiguration = null;
+  }
+
+  // Test DeviceManagementServiceConfig.Read.All permission (Autopilot
+  // reporting). Non-blocking: Autopilot reporting is optional, so this only
+  // informs the UI, same rationale as the assignment-filters test above.
+  try {
+    const autopilotTestResponse = await fetch(
+      'https://graph.microsoft.com/v1.0/deviceManagement/windowsAutopilotDeviceIdentities?$top=1&$select=id',
+      {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    if (autopilotTestResponse.status === 403) {
+      permissions.deviceManagementServiceConfigRead = false;
+    } else if (autopilotTestResponse.status >= 500) {
+      permissions.deviceManagementServiceConfigRead = null;
+    } else {
+      permissions.deviceManagementServiceConfigRead = true;
+    }
+
+    logApiPermissionTest(
+      '/api/auth/verify-consent',
+      tenantId,
+      'DeviceManagementServiceConfig.Read.All',
+      autopilotTestResponse.status,
+      permissions.deviceManagementServiceConfigRead
+    );
+  } catch {
+    permissions.deviceManagementServiceConfigRead = null;
   }
 
   const hasRequiredPermission = permissions.deviceManagementApps === true;

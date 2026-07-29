@@ -4,6 +4,7 @@
  * Protected by HMAC-SHA256 signature verification
  */
 
+import crypto from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { getDatabase } from '@/lib/db';
 import { verifyCallbackSignature } from '@/lib/callback-signature';
@@ -22,12 +23,16 @@ export async function POST(request: NextRequest) {
     const signature = request.headers.get('X-Signature');
     const callbackSecret = process.env.CALLBACK_SECRET;
 
-    if (!callbackSecret && process.env.NODE_ENV === 'production') {
-      console.error('[Callback] CALLBACK_SECRET is required in production');
+    // Fail closed in every environment, not just when NODE_ENV is literally
+    // "production" - self-hosted Docker entrypoints frequently don't set
+    // NODE_ENV at all, which previously skipped signature verification
+    // entirely and let anyone who knew a job UUID forge callbacks.
+    if (!callbackSecret) {
+      console.error('[Callback] CALLBACK_SECRET is not configured; rejecting callback');
       return NextResponse.json({ error: 'Callback verification is unavailable' }, { status: 503 });
     }
 
-    if (callbackSecret && !verifyCallbackSignature(body, signature, callbackSecret)) {
+    if (!verifyCallbackSignature(body, signature, callbackSecret)) {
       return NextResponse.json({ error: 'Invalid signature' }, { status: 401 });
     }
 
@@ -131,34 +136,6 @@ export async function POST(request: NextRequest) {
         category: data.errorCategory,
         code: data.errorCode,
       });
-
-      // Persist the quarantine before making the job terminal when the legacy
-      // job contains a complete trusted tuple. Dispatch preflight still fails
-      // closed if shared state is unavailable, so callback bookkeeping must not
-      // be held open by a transient storage problem.
-      if (data.errorCode === 'HASH_MISMATCH') {
-        const packageConfig = currentJob.package_config && typeof currentJob.package_config === 'object'
-          && !Array.isArray(currentJob.package_config)
-          ? currentJob.package_config as Record<string, unknown>
-          : {};
-        const actualHash = data.errorDetails && typeof data.errorDetails.actualHash === 'string'
-          ? data.errorDetails.actualHash
-          : undefined;
-        try {
-          await quarantineInstaller({
-            wingetId: currentJob.winget_id,
-            version: currentJob.version,
-            architecture: currentJob.architecture || 'x64',
-            installerUrl: currentJob.installer_url || '',
-            installerSha256: currentJob.installer_sha256 || '',
-            installerType: currentJob.installer_type || undefined,
-            installScope: currentJob.install_scope === 'user' ? 'user' : 'machine',
-            sourceType: packageConfig.sourceType === 'custom' ? 'custom' : 'winget',
-          }, actualHash, 'HASH_MISMATCH', data.message || 'The installer failed SHA256 verification');
-        } catch (quarantineError) {
-          console.error('Could not persist installer quarantine from callback:', quarantineError);
-        }
-      }
     }
 
     // Optimistic status condition prevents a cancellation or another terminal
@@ -176,7 +153,34 @@ export async function POST(request: NextRequest) {
     }
 
     // Side effects run only after the state transition succeeds, making callback
-    // retries idempotent and preventing duplicate history rows.
+    // retries idempotent and preventing duplicate history rows - quarantine is a
+    // global, catalog-wide side effect, so it must not fire for a callback that
+    // just lost the race above (updatedJob null) even though this specific job
+    // never actually reached the failed state.
+    if (data.status === 'failed' && data.errorCode === 'HASH_MISMATCH') {
+      const packageConfig = currentJob.package_config && typeof currentJob.package_config === 'object'
+        && !Array.isArray(currentJob.package_config)
+        ? currentJob.package_config as Record<string, unknown>
+        : {};
+      const actualHash = data.errorDetails && typeof data.errorDetails.actualHash === 'string'
+        ? data.errorDetails.actualHash
+        : undefined;
+      try {
+        await quarantineInstaller({
+          wingetId: currentJob.winget_id,
+          version: currentJob.version,
+          architecture: currentJob.architecture || 'x64',
+          installerUrl: currentJob.installer_url || '',
+          installerSha256: currentJob.installer_sha256 || '',
+          installerType: currentJob.installer_type || undefined,
+          installScope: currentJob.install_scope === 'user' ? 'user' : 'machine',
+          sourceType: packageConfig.sourceType === 'custom' ? 'custom' : 'winget',
+        }, actualHash, 'HASH_MISMATCH', data.message || 'The installer failed SHA256 verification');
+      } catch (quarantineError) {
+        console.error('Could not persist installer quarantine from callback:', quarantineError);
+      }
+    }
+
     if (data.status === 'deployed' && data.intuneAppId) {
       try {
         await db.uploadHistory.create({
@@ -194,6 +198,21 @@ export async function POST(request: NextRequest) {
         // The terminal job state is authoritative. Do not ask the workflow to
         // retry a callback that can no longer repeat this side effect.
         console.error(`[Callback] Failed to create upload history for ${data.jobId}:`, historyError);
+      }
+
+      // Clean up stale update_check_results so the Updates page no longer
+      // shows "update available" for the app that was just deployed - same
+      // cleanup the standalone packager's job-update route performs.
+      if (currentJob.tenant_id && currentJob.winget_id) {
+        try {
+          await db.updateCheckResults.deleteByUserTenantWinget(
+            currentJob.user_id,
+            currentJob.tenant_id,
+            currentJob.winget_id
+          );
+        } catch (cleanupError) {
+          console.error(`[Callback] Failed to clean up update_check_results for ${data.jobId}:`, cleanupError);
+        }
       }
     }
 
@@ -225,7 +244,40 @@ export async function POST(request: NextRequest) {
 /**
  * GET handler for health check / verification
  */
-export async function GET() {
+/**
+ * True only if the request presents the CALLBACK_SECRET as a bearer token.
+ * Fails closed when the secret isn't configured, so an unset secret never
+ * makes the detailed branch below universally accessible.
+ */
+function isAuthorizedHealthCheck(request: NextRequest): boolean {
+  const callbackSecret = process.env.CALLBACK_SECRET;
+  if (!callbackSecret) {
+    return false;
+  }
+
+  const authHeader = request.headers.get('authorization');
+  if (!authHeader) {
+    return false;
+  }
+
+  const expected = Buffer.from(`Bearer ${callbackSecret}`);
+  const actual = Buffer.from(authHeader);
+  return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+}
+
+export async function GET(request: NextRequest) {
+  // Configuration flags, the public URL, and job stats are operational
+  // detail an anonymous caller shouldn't get for free - only expose them to
+  // a caller that can already prove it knows CALLBACK_SECRET. Everyone else
+  // (e.g. a plain uptime monitor) gets just enough to know the route is up.
+  if (!isAuthorizedHealthCheck(request)) {
+    return NextResponse.json({
+      status: 'ok',
+      message: 'Package callback endpoint is active',
+      timestamp: new Date().toISOString(),
+    });
+  }
+
   const databaseMode = process.env.DATABASE_MODE || 'supabase';
 
   const healthInfo: Record<string, unknown> = {

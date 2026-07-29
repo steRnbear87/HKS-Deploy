@@ -7,7 +7,7 @@
  * workaround.
  */
 
-import { fetchWithRetry } from './graph-client';
+import { fetchWithRetry, fetchAllGraphPages } from './graph-client';
 import type { FeatureUpdateProfile } from '@/types/windows-updates';
 import type { AssignmentTarget } from '@/types/intune';
 
@@ -31,16 +31,12 @@ function toFeatureUpdateProfile(raw: Record<string, unknown>): FeatureUpdateProf
 }
 
 export async function listFeatureUpdateProfiles(token: string): Promise<FeatureUpdateProfile[]> {
-  const response = await fetchWithRetry(`${GRAPH_API_BASE_BETA}/${RESOURCE}`, {
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-  }, 3);
-
-  if (!response.ok) {
-    throw new Error(`Failed to list feature update profiles: ${response.status}`);
-  }
-
-  const data: { value?: Array<Record<string, unknown>> } = await response.json();
-  return (data.value || []).map(toFeatureUpdateProfile);
+  const rows = await fetchAllGraphPages<Record<string, unknown>>(
+    `${GRAPH_API_BASE_BETA}/${RESOURCE}`,
+    token,
+    'Failed to list feature update profiles'
+  );
+  return rows.map(toFeatureUpdateProfile);
 }
 
 export async function getFeatureUpdateProfile(token: string, profileId: string): Promise<FeatureUpdateProfile> {
@@ -113,14 +109,10 @@ export async function listFeatureUpdateProfileAssignments(
   token: string,
   profileId: string
 ): Promise<AssignmentTarget[]> {
-  const response = await fetchWithRetry(`${GRAPH_API_BASE_BETA}/${RESOURCE}/${profileId}/assignments`, {
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-  }, 3);
-
-  if (!response.ok) {
-    throw new Error(`Failed to list assignments for feature update profile ${profileId}: ${response.status}`);
-  }
-
-  const data: { value?: Array<{ target: AssignmentTarget }> } = await response.json();
-  return (data.value || []).map((a) => a.target);
+  const rows = await fetchAllGraphPages<{ target: AssignmentTarget }>(
+    `${GRAPH_API_BASE_BETA}/${RESOURCE}/${profileId}/assignments`,
+    token,
+    `Failed to list assignments for feature update profile ${profileId}`
+  );
+  return rows.map((a) => a.target);
 }

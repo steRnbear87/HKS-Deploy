@@ -72,10 +72,22 @@ function getManagedIdentityCredential(): ManagedIdentityCredential {
  * In managed-identity mode the tenant is the managed identity's home tenant and
  * `tenantId` is ignored.
  */
+// Validated before being interpolated into the token URL - today's callers
+// only ever pass a JWT `tid` claim (a GUID) or a test fixture's stand-in
+// value, but nothing enforced a safe shape, so a future caller passing
+// free-form input (a "/", "?", "#", "@", or ".." in particular) could have
+// altered the request path/host. Not limited to strict GUID format since
+// well-known aliases ("common", "organizations", "consumers") and
+// non-Azure-real test/self-hosted identifiers should also be usable.
+const TENANT_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+
 export async function acquireAppOnlyToken(
   tenantId: string,
   scope: string = GRAPH_DEFAULT_SCOPE
 ): Promise<AppTokenResult> {
+  if (!TENANT_ID_PATTERN.test(tenantId)) {
+    return { ok: false, error: 'missing_credentials', errorDescription: `Invalid tenant ID: ${tenantId}` };
+  }
   return isManagedIdentityMode()
     ? acquireViaManagedIdentity(scope)
     : acquireViaClientSecret(tenantId, scope);

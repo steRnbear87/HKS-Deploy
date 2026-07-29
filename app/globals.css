@@ -564,6 +564,17 @@
   scrollbar-color: var(--scrollbar-thumb) var(--bg-surface);
 }
 
+/* Hides the scrollbar entirely while the element stays scrollable - for
+   panels where a visible track/thumb would be a distraction (filter
+   sidebars, horizontal chip rows). */
+.scrollbar-hide {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
 /* Selection color - cyan accent */
 ::selection {
   background: var(--selection-bg);

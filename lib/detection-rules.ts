@@ -15,7 +15,7 @@ import type {
 } from '@/types/intune';
 import type { NormalizedInstaller, WingetInstallerType, WingetScope } from '@/types/winget';
 import { resolveInstallerFileName } from '@/lib/installer-filename';
-import { normalizeMarkerPath } from '@/lib/registry-marker';
+import { normalizeMarkerPath, sanitizeMarkerVersion } from '@/lib/registry-marker';
 
 /**
  * Generate detection rules based on installer metadata
@@ -60,8 +60,17 @@ export function generateDetectionRules(
 
     case 'msix':
     case 'appx':
-      // MSIX: Must use script detection with Package Family Name
-      return generateMsixDetectionRules(installer, displayName);
+      // MSIX: prefer the registry marker, same as MSI/EXE - PSADT writes it
+      // for every installer type including MSIX, and it does a proper
+      // version comparison. Presence-only script detection (the fallback
+      // below) can't tell an old version from this one, and Intune skips the
+      // install command entirely once detection reports installed - so
+      // without version awareness, an update would never actually run on a
+      // device that already has any version of the package.
+      if (wingetId && version) {
+        return generateRegistryMarkerDetectionRules(wingetId, version, installer.scope, markerPath);
+      }
+      return generateMsixDetectionRules(installer, displayName, version);
 
     case 'exe':
     case 'inno':
@@ -109,8 +118,13 @@ function generateRegistryMarkerDetectionRules(
   scope?: WingetScope,
   markerPath?: string
 ): DetectionRule[] {
-  // Sanitize wingetId: replace . and - with _ to create valid registry key name
-  const sanitizedId = wingetId.replace(/[\.\-]/g, '_');
+  // Sanitize wingetId: replace . and - with _ to create valid registry key name.
+  // Must stay in sync with packager/src/job-processor.ts's sanitizeWingetId,
+  // which additionally strips anything outside this charset before writing
+  // the actual marker - otherwise a winget_id with unusual characters would
+  // make Intune's detection rule and the packager's written marker disagree
+  // on the key path.
+  const sanitizedId = wingetId.replace(/[\.\-]/g, '_').replace(/[^A-Za-z0-9_+]/g, '');
 
   // Use HKCU for user scope, HKLM for machine scope (default)
   const hive = scope === 'user' ? 'HKEY_CURRENT_USER' : 'HKEY_LOCAL_MACHINE';
@@ -123,7 +137,12 @@ function generateRegistryMarkerDetectionRules(
       check32BitOn64System: false,
       detectionType: 'version',
       operator: 'greaterThanOrEqual',
-      detectionValue: version,
+      // Must match exactly what the marker-writer actually writes to the
+      // registry (packager/src/job-processor.ts's sanitizeVersion, or
+      // Create-PSADTPackage.ps1's equivalent) - see sanitizeMarkerVersion's
+      // docblock for why an unsanitized value here can permanently break
+      // Intune's version comparison.
+      detectionValue: sanitizeMarkerVersion(version),
     } as RegistryDetectionRule,
   ];
 }
@@ -170,13 +189,14 @@ function generateMsiDetectionRules(
  */
 function generateMsixDetectionRules(
   installer: NormalizedInstaller,
-  displayName: string
+  displayName: string,
+  version?: string
 ): DetectionRule[] {
   if (installer.packageFamilyName) {
     return [
       {
         type: 'script',
-        scriptContent: generateMsixDetectionScript(installer.packageFamilyName),
+        scriptContent: generateMsixDetectionScript(installer.packageFamilyName, version),
         enforceSignatureCheck: false,
         runAs32Bit: false,
       } as ScriptDetectionRule,
@@ -251,18 +271,62 @@ function getBasePath(scope?: WingetScope, architecture?: string): string {
 /**
  * Generate MSIX detection script
  * MSIX apps are detected via Get-AppxPackage
+ *
+ * When `version` is provided, the script also compares the installed
+ * package's Version against it. Presence alone can't distinguish an old
+ * version from the one just deployed, and Intune skips the install command
+ * entirely once detection reports "installed" - without this comparison, an
+ * update would never actually run on a device that already has any version
+ * of the package. Falls back to presence-only detection if no version is
+ * available, or if a version string can't be parsed at runtime (fails open
+ * to "installed" rather than getting stuck reporting "not installed").
  */
-function generateMsixDetectionScript(packageFamilyName: string): string {
+function generateMsixDetectionScript(packageFamilyName: string, version?: string): string {
   // Extract the package name (before the underscore in family name)
   const packageName = packageFamilyName.split('_')[0];
 
+  if (!version) {
+    const lines = [
+      '# MSIX Detection Script',
+      `# Package Family Name: ${packageFamilyName}`,
+      '',
+      '$ErrorActionPreference = "SilentlyContinue"',
+      `$package = Get-AppxPackage -Name "*${packageName}*" -AllUsers`,
+      'if ($package) {',
+      '    Write-Output "Installed"',
+      '    exit 0',
+      '}',
+      'exit 1',
+    ];
+    return lines.join('\n');
+  }
+
+  const escapedVersion = version.replace(/'/g, "''");
   const lines = [
-    '# MSIX Detection Script',
+    '# MSIX Detection Script (version-aware)',
     `# Package Family Name: ${packageFamilyName}`,
+    `# Required version: ${version}`,
     '',
     '$ErrorActionPreference = "SilentlyContinue"',
-    `$package = Get-AppxPackage -Name "*${packageName}*" -AllUsers`,
-    'if ($package) {',
+    `$packages = Get-AppxPackage -Name "*${packageName}*" -AllUsers`,
+    `$requiredVersion = '${escapedVersion}'`,
+    '',
+    '$installed = $false',
+    'foreach ($pkg in $packages) {',
+    '    try {',
+    '        if ([version]$pkg.Version -ge [version]$requiredVersion) {',
+    '            $installed = $true',
+    '            break',
+    '        }',
+    '    } catch {',
+    '        # Version strings did not parse as comparable - fall back to',
+    '        # presence-only for this package rather than blocking detection',
+    '        $installed = $true',
+    '        break',
+    '    }',
+    '}',
+    '',
+    'if ($installed) {',
     '    Write-Output "Installed"',
     '    exit 0',
     '}',

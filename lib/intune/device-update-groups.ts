@@ -83,6 +83,25 @@ async function createDeviceGroup(token: string, deviceId: string, deviceName: st
   return group.id;
 }
 
+/** Best-effort cleanup for a group this process created but lost the race
+ * to persist (see ensureDeviceUpdateGroup) - never thrown, only logged, so
+ * a cleanup failure doesn't surface as an error on what is otherwise a
+ * successful assignment. */
+async function deleteDeviceGroupBestEffort(token: string, groupId: string): Promise<void> {
+  try {
+    const response = await fetchWithRetry(`${GRAPH_API_BASE}/groups/${groupId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    }, 3);
+    if (!response.ok && response.status !== 404) {
+      const body = await response.text().catch(() => '');
+      console.error(`[device-update-groups] Failed to clean up orphaned group ${groupId}: ${response.status} ${body}`);
+    }
+  } catch (error) {
+    console.error(`[device-update-groups] Failed to clean up orphaned group ${groupId}:`, error);
+  }
+}
+
 async function addDeviceToGroup(token: string, groupId: string, deviceObjectId: string): Promise<void> {
   const response = await fetchWithRetry(`${GRAPH_API_BASE}/groups/${groupId}/members/$ref`, {
     method: 'POST',
@@ -102,6 +121,15 @@ async function addDeviceToGroup(token: string, groupId: string, deviceObjectId: 
   }
 }
 
+// Dedupes concurrent ensureDeviceUpdateGroup calls for the same device
+// within this process (e.g. a double-clicked assign, or two policy types
+// assigned back-to-back before the first group finishes being created) so
+// only one of them actually creates a group in Entra. This does not cover
+// two different server instances racing on the same device at the same
+// moment - that residual case is handled by the post-upsert reconciliation
+// below, which cleans up whichever group loses.
+const inFlightCreates = new Map<string, Promise<{ groupId: string }>>();
+
 /**
  * Get-or-create the single-device Entra ID group used to target this device
  * with Windows Update policies. Safe to call repeatedly - reuses the stored
@@ -119,21 +147,45 @@ export async function ensureDeviceUpdateGroup(
     return { groupId: existing.entra_group_id };
   }
 
-  const token = await getServicePrincipalToken(tenantId);
-  if (!token) {
-    throw new Error(`Failed to get Graph token for tenant ${tenantId}`);
+  const lockKey = `${tenantId}:${deviceId}`;
+  const inFlight = inFlightCreates.get(lockKey);
+  if (inFlight) {
+    return inFlight;
   }
 
-  const deviceObjectId = await resolveEntraDeviceObjectId(token, azureADDeviceId);
-  const groupId = await createDeviceGroup(token, deviceId, deviceName);
-  await addDeviceToGroup(token, groupId, deviceObjectId);
+  const create = (async (): Promise<{ groupId: string }> => {
+    const token = await getServicePrincipalToken(tenantId);
+    if (!token) {
+      throw new Error(`Failed to get Graph token for tenant ${tenantId}`);
+    }
 
-  await db.deviceUpdateGroups.upsert({
-    tenant_id: tenantId,
-    device_id: deviceId,
-    azure_ad_device_id: azureADDeviceId,
-    entra_group_id: groupId,
-  });
+    const deviceObjectId = await resolveEntraDeviceObjectId(token, azureADDeviceId);
+    const groupId = await createDeviceGroup(token, deviceId, deviceName);
+    await addDeviceToGroup(token, groupId, deviceObjectId);
 
-  return { groupId };
+    const persisted = await db.deviceUpdateGroups.upsert({
+      tenant_id: tenantId,
+      device_id: deviceId,
+      azure_ad_device_id: azureADDeviceId,
+      entra_group_id: groupId,
+    });
+
+    // A different process could have upserted its own group for this
+    // device between our getByDeviceId check and this upsert. If the
+    // persisted row doesn't point at the group we just created, we lost
+    // that race - delete our now-orphaned group and use the winner.
+    if (persisted.entra_group_id !== groupId) {
+      await deleteDeviceGroupBestEffort(token, groupId);
+      return { groupId: persisted.entra_group_id };
+    }
+
+    return { groupId };
+  })();
+
+  inFlightCreates.set(lockKey, create);
+  try {
+    return await create;
+  } finally {
+    inFlightCreates.delete(lockKey);
+  }
 }

@@ -92,6 +92,17 @@ function normalizeCategories(config: DeploymentConfig): IntuneAppCategorySelecti
   return normalized;
 }
 
+// Module-level (not instance-level, since createAutoUpdateTrigger() hands
+// out a fresh instance per call) dedup for concurrent triggerAutoUpdate
+// calls against the same policy - e.g. the daily cron sweep and a manual
+// "Update Now" click landing at nearly the same moment. The rate-limit
+// cooldown check is a plain read followed by a later write with no lock
+// between them, so without this, both callers could pass the check before
+// either commits its history row and end up creating two packaging jobs
+// for the same app+version. Callers that lose the race get the same result
+// the winner produced, rather than triggering their own redundant job.
+const inFlightTriggers = new Map<string, Promise<TriggerResult>>();
+
 /**
  * Main service for triggering auto-updates
  */
@@ -114,11 +125,46 @@ export class AutoUpdateTrigger {
   async triggerAutoUpdate(
     policy: AppUpdatePolicy,
     updateInfo: UpdateInfo,
-    options?: { skipRateLimits?: boolean; skipPriorDeploymentCheck?: boolean }
+    options?: {
+      skipRateLimits?: boolean;
+      skipPriorDeploymentCheck?: boolean;
+      /**
+       * Set by a manual "Update Now" trigger for an app whose real policy is
+       * `ignore`/`pin_version`/disabled. Bypasses the policy-type gate for
+       * this one call WITHOUT writing 'auto_update'/enabled to the DB row -
+       * a previous version of this flow flipped the row in the database for
+       * the duration of the trigger, which meant the cron's own eligibility
+       * query (`policy_type='auto_update' AND is_enabled=true`) could see
+       * and independently trigger its own update for an app the user
+       * explicitly excluded, if its scan landed during that window.
+       */
+      skipPolicyGateCheck?: boolean;
+    }
+  ): Promise<TriggerResult> {
+    const existing = inFlightTriggers.get(policy.id);
+    if (existing) {
+      return existing;
+    }
+
+    const promise = this.triggerAutoUpdateInternal(policy, updateInfo, options).finally(() => {
+      inFlightTriggers.delete(policy.id);
+    });
+    inFlightTriggers.set(policy.id, promise);
+    return promise;
+  }
+
+  private async triggerAutoUpdateInternal(
+    policy: AppUpdatePolicy,
+    updateInfo: UpdateInfo,
+    options?: {
+      skipRateLimits?: boolean;
+      skipPriorDeploymentCheck?: boolean;
+      skipPolicyGateCheck?: boolean;
+    }
   ): Promise<TriggerResult> {
     try {
       // Safety check 1: Verify policy allows auto-update
-      if (!canAutoUpdate(policy)) {
+      if (!options?.skipPolicyGateCheck && !canAutoUpdate(policy, this.safetyConfig.maxConsecutiveFailures)) {
         return {
           success: false,
           skipped: true,
@@ -225,11 +271,17 @@ export class AutoUpdateTrigger {
     if (tenantPolicies && tenantPolicies.length > 0) {
       const tenantPolicyIds = tenantPolicies.map((p) => p.id);
 
-      // Check per-tenant rate limit
+      // Check per-tenant rate limit. Deliberately NOT filtered to
+      // status='completed' - a history row only reaches 'completed' once
+      // the external packaging pipeline finishes minutes later, so counting
+      // only completed rows meant a single cron pass (which triggers every
+      // eligible policy in a tenant before any of them can possibly have
+      // completed yet) never saw a nonzero count and the cap never engaged.
+      // Matches the user/global count below, which has never filtered by
+      // status for the same reason.
       const { count: tenantCount } = await this.supabase
         .from('auto_update_history')
         .select('id', { count: 'exact', head: true })
-        .eq('status', 'completed')
         .gte('triggered_at', oneHourAgo)
         .in('policy_id', tenantPolicyIds);
 
@@ -543,12 +595,21 @@ export class AutoUpdateTrigger {
     policyId: string,
     newVersion: string
   ): Promise<void> {
+    // Does NOT reset consecutive_failures - this runs once a packaging job
+    // has merely been *queued*, not once it has actually deployed
+    // successfully. Resetting the failure counter here meant a policy whose
+    // every deployment fails end-to-end could never accumulate more than 1
+    // consecutive failure (trigger succeeds -> reset to 0 -> deploy fails
+    // later -> increment to 1 -> next eligible cycle triggers again -> reset
+    // to 0 again...), defeating the circuit breaker entirely for the most
+    // common failure mode. handleAutoUpdateJobCompletion (cleanup.ts) is the
+    // only place that should reset it, since it runs once the outcome of
+    // the actual deployment is known.
     const { error } = await this.supabase
       .from('app_update_policies')
       .update({
         last_auto_update_at: new Date().toISOString(),
         last_auto_update_version: newVersion,
-        consecutive_failures: 0, // Reset on successful trigger
         updated_at: new Date().toISOString(),
       })
       .eq('id', policyId);
@@ -678,7 +739,8 @@ export function createAutoUpdateTrigger(): AutoUpdateTrigger | null {
  */
 export async function getLatestInstallerInfo(
   // Kept for call-site compatibility; the catalog source owns client creation.
-  _supabase: SupabaseClient,
+  // Null in self-hosted SQLite mode, where there is no Supabase client at all.
+  _supabase: SupabaseClient | null,
   wingetId: string
 ): Promise<UpdateInfo | null> {
   const catalog = getCatalogSource();

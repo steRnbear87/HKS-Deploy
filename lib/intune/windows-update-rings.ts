@@ -6,15 +6,11 @@
  * see lib/intune/device-update-groups.ts for the per-device workaround.
  */
 
-import { GRAPH_API_BASE, fetchWithRetry } from './graph-client';
+import { GRAPH_API_BASE, fetchWithRetry, fetchAllGraphPages } from './graph-client';
 import type { UpdateRing } from '@/types/windows-updates';
 import type { AssignmentTarget } from '@/types/intune';
 
 const ODATA_TYPE = '#microsoft.graph.windowsUpdateForBusinessConfiguration';
-
-interface GraphDeviceConfigListResponse {
-  value: Array<Record<string, unknown>>;
-}
 
 function toUpdateRing(raw: Record<string, unknown>): UpdateRing {
   return {
@@ -42,16 +38,12 @@ export async function listUpdateRings(token: string): Promise<UpdateRing[]> {
   const url = `${GRAPH_API_BASE}/deviceManagement/deviceConfigurations?$filter=${encodeURIComponent(
     `isof('${ODATA_TYPE.replace('#', '')}')`
   )}`;
-  const response = await fetchWithRetry(url, {
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-  }, 3);
-
-  if (!response.ok) {
-    throw new Error(`Failed to list update rings: ${response.status}`);
-  }
-
-  const data: GraphDeviceConfigListResponse = await response.json();
-  return (data.value || []).map(toUpdateRing);
+  const rows = await fetchAllGraphPages<Record<string, unknown>>(
+    url,
+    token,
+    'Failed to list update rings'
+  );
+  return rows.map(toUpdateRing);
 }
 
 export async function getUpdateRing(token: string, ringId: string): Promise<UpdateRing> {
@@ -170,16 +162,10 @@ export async function listUpdateRingAssignments(
   token: string,
   ringId: string
 ): Promise<AssignmentTarget[]> {
-  const response = await fetchWithRetry(
+  const rows = await fetchAllGraphPages<{ target: AssignmentTarget }>(
     `${GRAPH_API_BASE}/deviceManagement/deviceConfigurations/${ringId}/assignments`,
-    { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } },
-    3
+    token,
+    `Failed to list assignments for ring ${ringId}`
   );
-
-  if (!response.ok) {
-    throw new Error(`Failed to list assignments for ring ${ringId}: ${response.status}`);
-  }
-
-  const data: { value?: Array<{ target: AssignmentTarget }> } = await response.json();
-  return (data.value || []).map((a) => a.target);
+  return rows.map((a) => a.target);
 }

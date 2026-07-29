@@ -48,6 +48,8 @@ export function LinkPackageModal({ app, isOpen, onClose, onLink, onLinkAndClaim 
 
   // Search for packages
   useEffect(() => {
+    const controller = new AbortController();
+
     const searchPackages = async () => {
       if (!searchQuery || searchQuery.length < 2) {
         setSearchResults([]);
@@ -59,25 +61,36 @@ export function LinkPackageModal({ app, isOpen, onClose, onLink, onLinkAndClaim 
       setSearchError(null);
       try {
         const response = await fetch(
-          `/api/winget/search?q=${encodeURIComponent(searchQuery)}&limit=10`
+          `/api/winget/search?q=${encodeURIComponent(searchQuery)}&limit=10`,
+          { signal: controller.signal }
         );
+        if (controller.signal.aborted) return;
+
         if (response.ok) {
           const data = await response.json();
+          if (controller.signal.aborted) return;
           setSearchResults(data.packages || []);
         } else {
           setSearchError('Search failed. Please try again.');
           setSearchResults([]);
         }
       } catch {
+        if (controller.signal.aborted) return;
         setSearchError('Network error. Check your connection and try again.');
         setSearchResults([]);
       } finally {
-        setIsSearching(false);
+        if (!controller.signal.aborted) setIsSearching(false);
       }
     };
 
+    // Abort the in-flight request (not just the pending debounce timer) when
+    // a newer keystroke supersedes it, so a slower earlier search can't
+    // resolve after and overwrite a faster later one's results.
     const debounce = setTimeout(searchPackages, 300);
-    return () => clearTimeout(debounce);
+    return () => {
+      clearTimeout(debounce);
+      controller.abort();
+    };
   }, [searchQuery]);
 
   const handleLink = async (andClaim = false) => {

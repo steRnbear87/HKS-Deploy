@@ -3,14 +3,17 @@
  * Manages webhook delivery with retries and logging
  */
 
+import { fetch as undiciFetch } from 'undici';
 import { createServerClient } from '@/lib/supabase';
 import { createWebhookHeaders } from './webhook-signatures';
+import { validateWebhookUrl, createPinnedDispatcher } from '@/lib/webhooks/service';
 
 // Webhook event types
 export type WebhookEventType =
   | 'deployment.completed'
   | 'deployment.failed'
   | 'batch.completed'
+  | 'batch.failed'
   | 'member.joined'
   | 'member.removed'
   | 'consent.granted'
@@ -123,6 +126,23 @@ async function deliverWebhook(
     return;
   }
 
+  // Resolve and validate at delivery time (not just at registration) so a
+  // hostname repointed at a private/internal address after the webhook was
+  // saved can't be used for SSRF; the resolved IP is then pinned for the
+  // actual connection to close the DNS-rebinding TOCTOU gap - see
+  // lib/webhooks/service.ts's validateWebhookUrl/createPinnedDispatcher.
+  const urlValidation = await validateWebhookUrl(webhook.url);
+  if (!urlValidation.valid || !urlValidation.resolvedAddresses?.length) {
+    await handleDeliveryFailure(
+      supabase,
+      delivery,
+      webhook,
+      urlValidation.error || 'Webhook URL failed validation'
+    );
+    return;
+  }
+  const dispatcher = createPinnedDispatcher(urlValidation.resolvedAddresses);
+
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
 
@@ -133,16 +153,31 @@ async function deliverWebhook(
       webhook.headers
     );
 
-    const response = await fetch(webhook.url, {
+    const response = await undiciFetch(webhook.url, {
       method: 'POST',
       headers,
       body: payloadString,
       signal: controller.signal,
+      // Never follow redirects to an unvalidated target - see the matching
+      // comment in lib/webhooks/service.ts's deliverWebhook.
+      redirect: 'manual',
+      dispatcher,
     });
 
     clearTimeout(timeoutId);
 
     const responseBody = await response.text().catch(() => '');
+
+    if (response.status >= 300 && response.status < 400) {
+      await handleDeliveryFailure(
+        supabase,
+        delivery,
+        webhook,
+        'Webhook endpoint returned a redirect, which is not followed',
+        response.status
+      );
+      return;
+    }
 
     if (response.ok) {
       // Success - update delivery record
@@ -267,18 +302,37 @@ export async function sendTestWebhook(
   const payloadString = JSON.stringify(testPayload);
   const headers = createWebhookHeaders(payloadString, webhook.secret, webhook.headers);
 
+  const urlValidation = await validateWebhookUrl(webhook.url);
+  if (!urlValidation.valid || !urlValidation.resolvedAddresses?.length) {
+    return {
+      success: false,
+      message: urlValidation.error || 'Webhook URL failed validation',
+    };
+  }
+  const dispatcher = createPinnedDispatcher(urlValidation.resolvedAddresses);
+
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10000);
 
   try {
-    const response = await fetch(webhook.url, {
+    const response = await undiciFetch(webhook.url, {
       method: 'POST',
       headers,
       body: payloadString,
       signal: controller.signal,
+      redirect: 'manual',
+      dispatcher,
     });
 
     clearTimeout(timeoutId);
+
+    if (response.status >= 300 && response.status < 400) {
+      return {
+        success: false,
+        message: 'Webhook endpoint returned a redirect, which is not followed',
+        response_status: response.status,
+      };
+    }
 
     if (response.ok) {
       return {

@@ -15,6 +15,7 @@ import type {
   GraphApiResponse,
 } from '@/types/intune';
 import type { PackageAssignment } from '@/types/upload';
+import { fetchWithRetry, invalidateServicePrincipalToken } from '@/lib/intune/graph-client';
 
 const GRAPH_API_BASE = 'https://graph.microsoft.com/beta';
 
@@ -405,9 +406,10 @@ function mapRegistryDetectionType(type: string): string {
 export async function assignToGroups(
   accessToken: string,
   appId: string,
-  assignments: Win32LobAppAssignment[]
+  assignments: Win32LobAppAssignment[],
+  tenantId?: string
 ): Promise<void> {
-  const response = await fetch(
+  const response = await fetchWithRetry(
     `${GRAPH_API_BASE}/deviceAppManagement/mobileApps/${appId}/assign`,
     {
       method: 'POST',
@@ -418,10 +420,14 @@ export async function assignToGroups(
       body: JSON.stringify({
         mobileAppAssignments: assignments,
       }),
-    }
+    },
+    3
   );
 
   if (!response.ok) {
+    if (response.status === 401 && tenantId) {
+      invalidateServicePrincipalToken(tenantId);
+    }
     throw new Error('Failed to assign app to groups');
   }
 }
@@ -431,7 +437,8 @@ export async function assignToGroups(
  */
 export async function getEntraIDGroups(
   accessToken: string,
-  search?: string
+  search?: string,
+  tenantId?: string
 ): Promise<EntraIDGroup[]> {
   const url = new URL(`${GRAPH_API_BASE}/groups`);
   url.searchParams.set('$select', 'id,displayName,description,securityEnabled');
@@ -441,14 +448,17 @@ export async function getEntraIDGroups(
     url.searchParams.set('$search', `"displayName:${search}"`);
   }
 
-  const response = await fetch(url.toString(), {
+  const response = await fetchWithRetry(url.toString(), {
     headers: {
       Authorization: `Bearer ${accessToken}`,
       ConsistencyLevel: 'eventual',
     },
-  });
+  }, 3);
 
   if (!response.ok) {
+    if (response.status === 401 && tenantId) {
+      invalidateServicePrincipalToken(tenantId);
+    }
     throw new Error('Failed to get Entra ID groups');
   }
 
@@ -580,18 +590,23 @@ function getDefaultReturnCodes() {
  */
 export async function getApp(
   accessToken: string,
-  appId: string
+  appId: string,
+  tenantId?: string
 ): Promise<IntuneWin32App | null> {
-  const response = await fetch(
+  const response = await fetchWithRetry(
     `${GRAPH_API_BASE}/deviceAppManagement/mobileApps/${appId}`,
     {
       headers: {
         Authorization: `Bearer ${accessToken}`,
       },
-    }
+    },
+    3
   );
 
   if (!response.ok) {
+    if (response.status === 401 && tenantId) {
+      invalidateServicePrincipalToken(tenantId);
+    }
     if (response.status === 404) {
       return null;
     }
@@ -707,9 +722,10 @@ export async function getAppCategories(
 export async function addAppCategory(
   accessToken: string,
   appId: string,
-  categoryId: string
+  categoryId: string,
+  tenantId?: string
 ): Promise<void> {
-  const response = await fetch(
+  const response = await fetchWithRetry(
     `${GRAPH_API_BASE}/deviceAppManagement/mobileApps/${appId}/categories/$ref`,
     {
       method: 'POST',
@@ -720,10 +736,14 @@ export async function addAppCategory(
       body: JSON.stringify({
         '@odata.id': `${GRAPH_API_BASE}/deviceAppManagement/mobileAppCategories/${categoryId}`,
       }),
-    }
+    },
+    3
   );
 
   if (!response.ok) {
+    if (response.status === 401 && tenantId) {
+      invalidateServicePrincipalToken(tenantId);
+    }
     throw new Error(`Failed to add category ${categoryId} to app`);
   }
 }
@@ -734,19 +754,24 @@ export async function addAppCategory(
 export async function removeAppCategory(
   accessToken: string,
   appId: string,
-  categoryId: string
+  categoryId: string,
+  tenantId?: string
 ): Promise<void> {
-  const response = await fetch(
+  const response = await fetchWithRetry(
     `${GRAPH_API_BASE}/deviceAppManagement/mobileApps/${appId}/categories/${categoryId}/$ref`,
     {
       method: 'DELETE',
       headers: {
         Authorization: `Bearer ${accessToken}`,
       },
-    }
+    },
+    3
   );
 
   if (!response.ok && response.status !== 404) {
+    if (response.status === 401 && tenantId) {
+      invalidateServicePrincipalToken(tenantId);
+    }
     throw new Error(`Failed to remove category ${categoryId} from app`);
   }
 }
@@ -757,7 +782,8 @@ export async function removeAppCategory(
 export async function syncAppCategories(
   accessToken: string,
   appId: string,
-  desiredCategories: { id: string }[]
+  desiredCategories: { id: string }[],
+  tenantId?: string
 ): Promise<void> {
   const currentCategories = await getAppCategories(accessToken, appId);
   const currentIds = new Set(currentCategories.map((c) => c.id));
@@ -767,8 +793,8 @@ export async function syncAppCategories(
   const toRemove = currentCategories.filter((c) => !desiredIds.has(c.id));
 
   await Promise.all([
-    ...toAdd.map((c) => addAppCategory(accessToken, appId, c.id)),
-    ...toRemove.map((c) => removeAppCategory(accessToken, appId, c.id)),
+    ...toAdd.map((c) => addAppCategory(accessToken, appId, c.id, tenantId)),
+    ...toRemove.map((c) => removeAppCategory(accessToken, appId, c.id, tenantId)),
   ]);
 }
 

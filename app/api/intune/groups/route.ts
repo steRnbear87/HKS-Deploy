@@ -85,7 +85,7 @@ export async function GET(request: NextRequest) {
     }
 
     // Fetch groups from Graph API using the intune-api helper
-    const groups = await getEntraIDGroups(graphToken, search || undefined);
+    const groups = await getEntraIDGroups(graphToken, search || undefined, tenantId);
 
     return NextResponse.json({
       groups,

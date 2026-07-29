@@ -142,13 +142,17 @@ export function normalizeVersion(version: string | null | undefined): string {
     .replace(/^version\s*/i, '')
     .trim();
 
-  // Handle versions like "1.2" by adding .0
+  // Handle versions like "1.2" by adding .0 - pad up to at least 3 segments
+  // but never truncate down. This used to slice to exactly 3 segments,
+  // which silently collapsed "1.2.3.4" and "1.2.3.9" to the same "1.2.3"
+  // and made every comparison downstream blind to real 4th-segment
+  // differences - the common case for WinGet/MSI build numbers.
   const parts = normalized.split('.');
   while (parts.length < 3) {
     parts.push('0');
   }
 
-  return parts.slice(0, 3).join('.');
+  return parts.join('.');
 }
 
 /**

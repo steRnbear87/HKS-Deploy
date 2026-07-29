@@ -17,6 +17,7 @@ export { RecentActivityList } from './RecentActivityList';
 export { DeploymentStatusIndicator } from './DeploymentStatusIndicator';
 export { ErrorBoundary } from './ErrorBoundary';
 export { DevicePlatformBreakdown } from './DevicePlatformBreakdown';
+export { DeviceRegionBreakdown } from './DeviceRegionBreakdown';
 export { DeviceEncryptionRollup } from './DeviceEncryptionRollup';
 export { DevicesDonutChart } from './DevicesDonutChart';
 export { FleetWindowsUpdateCard } from './FleetWindowsUpdateCard';
